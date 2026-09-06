@@ -56,6 +56,22 @@ pub enum InitError {
   /// fail construction with a capacity error naming a ceiling nothing can meet.
   /// Must be non-zero.
   ZeroGossipReadCap,
+  /// [`Options::max_pending_seeds`](crate::Options::max_pending_seeds) is zero.
+  ///
+  /// The cap is the join-seed queue ceiling, and `join` admits a seed only while
+  /// the queue is below it, so a zero cap queues nothing: every `join` would
+  /// return `Ok` having silently dropped every seed, and the node could never
+  /// reach a cluster it was not told about by gossip. Must be non-zero.
+  ZeroMaxPendingSeeds,
+  /// [`Options::max_pending_dials`](crate::Options::max_pending_dials) is zero.
+  ///
+  /// The cap bounds how many reliable dials may wait BEYOND what the free pool
+  /// could take, and a dial is admitted only while that excess is below it. Zero
+  /// therefore refuses every dial the pool cannot absorb at once — including the
+  /// first dial made while the pool is momentarily empty — so a node with a busy
+  /// reliable plane could neither join nor send a reliable message. Must be
+  /// non-zero.
+  ZeroMaxPendingDials,
   /// The configured gossip MTU's on-wire datagram cannot fit a UDP packet.
   ///
   /// A driver sizes its gossip arenas from
@@ -160,6 +176,8 @@ impl fmt::Display for InitError {
       InitError::ZeroPort => f.write_str("port is zero"),
       InitError::ZeroCloseTimeout => f.write_str("close_timeout must be non-zero"),
       InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
+      InitError::ZeroMaxPendingSeeds => f.write_str("max_pending_seeds must be non-zero"),
+      InitError::ZeroMaxPendingDials => f.write_str("max_pending_dials must be non-zero"),
       InitError::GossipMtuTooLarge(m) => write!(f, "{m}"),
       InitError::GossipRecvCapacityTooLarge(n) => write!(
         f,

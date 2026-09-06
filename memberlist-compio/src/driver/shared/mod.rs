@@ -11,14 +11,16 @@
 //! them without depending on the byte-stream plane (which is only compiled with
 //! a `tcp` / `tls-*` feature).
 
-use std::cell::Cell;
+use std::{cell::Cell, future::Future, pin::Pin, time::Duration};
+
+use compio::{buf::BufResult, net::UdpSocket};
 
 use memberlist_proto::event::Event;
 
-use crate::{delegate::Delegate, transport::runtime::CidrFilter};
+use crate::{delegate::Delegate, error::UnreleasedSocket, transport::runtime::CidrFilter};
 use core::task::Poll;
 use smallvec::SmallVec;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 /// Coordinator-allocated handle for one in-flight reliable exchange.
 ///
@@ -145,6 +147,393 @@ pub(crate) fn cidr_blocks(filter: &CidrFilter, ip: IpAddr) -> bool {
 #[cfg(not(feature = "cidr"))]
 pub(crate) fn cidr_blocks(_filter: &CidrFilter, _ip: IpAddr) -> bool {
   false
+}
+
+/// One in-flight `recv_from` on a driver's gossip UDP socket, owning its
+/// buffer until the operation resolves. Boxed so [`PendingRecv`] can hold it
+/// across loop iterations at a stable address.
+pub(crate) type RecvFut<'a> =
+  Pin<Box<dyn Future<Output = BufResult<(usize, SocketAddr), Vec<u8>>> + 'a>>;
+
+/// A driver loop's single in-flight datagram receive.
+///
+/// Exactly ONE `recv_from` operation stays armed for the whole life of the
+/// loop, and it is re-armed only after it has resolved. The alternative —
+/// building a fresh `recv_from` every iteration and abandoning it whenever a
+/// non-recv select arm wins — is unsound on a completion-based backend
+/// (io_uring on Linux, IOCP on Windows), where the buffer is handed to the
+/// kernel at submit time rather than filled at poll time:
+///
+/// * A datagram the kernel has already delivered into the abandoned buffer is
+///   discarded, so inbound gossip is silently lost whenever the loop happens
+///   to service a command or a timer instead.
+/// * Each abandoned operation keeps a reference to the socket's shared
+///   descriptor until its cancellation is reaped. io_uring's cancellation is
+///   itself a submission-queue entry that is dropped when that queue is full,
+///   and a loop that resolves a ready arm without ever yielding to the runtime
+///   never lets the queue drain, so those operations are stranded permanently.
+///   `UdpSocket::close` waits for the descriptor's last reference, so a
+///   stranded operation makes the post-loop close — and with it the caller's
+///   `shutdown` — hang forever.
+///
+/// A readiness-based backend (epoll, kqueue) consumes nothing until the future
+/// is polled, which is why the defect is invisible outside io_uring/IOCP. This
+/// is the same discipline the stream driver's accept future already follows.
+///
+/// The borrowed socket must outlive the holder. A driver whose socket lives
+/// inside a struct it also borrows mutably each iteration passes a reference to
+/// a CLONE; one that owns the socket as a local passes it directly. Either way
+/// the pending future — and any clone it borrows — must be dropped before the
+/// post-loop close, which awaits the sole remaining reference to the descriptor.
+pub(crate) struct PendingRecv<'a> {
+  socket: &'a UdpSocket,
+  buf_len: usize,
+  fut: RecvFut<'a>,
+}
+
+impl<'a> PendingRecv<'a> {
+  /// Arm the first receive on `socket`.
+  pub(crate) fn new(socket: &'a UdpSocket, buf_len: usize) -> Self {
+    let fut = Box::pin(socket.recv_from(vec![0u8; buf_len]));
+    Self {
+      socket,
+      buf_len,
+      fut,
+    }
+  }
+
+  /// The pending operation, for polling inside a `select`.
+  pub(crate) fn fut(&mut self) -> &mut RecvFut<'a> {
+    &mut self.fut
+  }
+
+  /// Arm a fresh receive with a fresh buffer.
+  ///
+  /// Call this ONLY after the pending future has resolved: the resolved future
+  /// has released its buffer and its descriptor reference, so re-arming
+  /// strands nothing. Calling it on an unresolved future would reintroduce the
+  /// abandonment this type exists to prevent.
+  pub(crate) fn rearm(&mut self) {
+    self.fut = Box::pin(self.socket.recv_from(vec![0u8; self.buf_len]));
+  }
+}
+
+/// Payload of the teardown marker datagram.
+///
+/// The bytes are never interpreted: the marker is sent only after a driver
+/// loop has exited, and the receive it completes is discarded rather than fed
+/// to the endpoint. The pattern is fixed and private purely so a datagram seen
+/// while debugging is recognisable.
+const TEARDOWN_MARKER: [u8; 8] = [0xff, 0x00, 0x6d, 0x6c, 0x74, 0x64, 0x00, 0xff];
+
+/// Marker sends attempted before falling back to the drop-based path.
+///
+/// Two, not more: every step inside an attempt is bounded by
+/// [`TEARDOWN_STEP_TIMEOUT`], so each further attempt adds that bound twice to
+/// the worst-case shutdown, and a marker neither of two attempts can land is
+/// not going to land on a third — it is a loopback (or same-interface) datagram
+/// aimed at an address the socket is already bound to. The worst case the whole
+/// teardown can reach is stated on
+/// [`Memberlist::shutdown`](crate::Memberlist::shutdown).
+const TEARDOWN_MARKER_ATTEMPTS: usize = 2;
+
+/// Bound on EVERY individual await inside a teardown completion protocol.
+///
+/// These helpers exist so shutdown cannot hang, so none of their own awaits
+/// may be unbounded either. The submission queue cannot block a send or a
+/// connect — an ordinary push drains the ring and retries — but the kernel
+/// side can: an interface torn down mid-teardown, or a send that never
+/// completes, would otherwise park the teardown forever. An elapsed step is
+/// treated exactly like a failed one.
+const TEARDOWN_STEP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Ceiling on a driver's post-loop socket close.
+///
+/// The close is expected to be immediate once the last receive has been
+/// completed. The bound exists so that a teardown which could not complete it
+/// — a send failure, or a platform where the self-addressed datagram does not
+/// come back — degrades to a slow shutdown instead of a hung one.
+pub(crate) const TEARDOWN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The socket's own address, as a destination it can send to.
+fn self_addressed_dest(socket: &UdpSocket) -> Option<SocketAddr> {
+  self_addressed(socket.local_addr().ok()?)
+}
+
+/// A bound local address, as a destination it can be reached on.
+///
+/// A wildcard bind (`0.0.0.0` / `::`) is not a valid destination, so the
+/// matching loopback address is substituted; the port is the bound one either
+/// way. Every other address is returned UNCHANGED rather than re-spelled: an
+/// IPv6 `SocketAddr` carries a `scope_id` and a `flowinfo` that
+/// [`SocketAddr::new`] cannot express, and a link-local bind (`fe80::...%en0`)
+/// is reachable ONLY through its scope — dropping it would aim the marker at an
+/// address the kernel cannot route to, and the teardown would fall back to the
+/// leaky drop-based path on exactly the binds that need it least. Returns
+/// `None` for an unbound address, whose port would be zero.
+fn self_addressed(local: SocketAddr) -> Option<SocketAddr> {
+  if local.port() == 0 {
+    return None;
+  }
+  match local {
+    SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+      Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), v4.port()))
+    }
+    SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+      Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), v6.port()))
+    }
+    concrete => Some(concrete),
+  }
+}
+
+/// The address a teardown marker is sent FROM: `dest`'s own address on an
+/// ephemeral port.
+///
+/// Same family, same interface address, and — for IPv6 — the same `scope_id`
+/// and `flowinfo`, so a link-local or interface-bound destination is reachable
+/// from it. The port is zero: the source socket is thrown away as soon as the
+/// marker has been sent, so it needs no stable identity.
+fn marker_source(dest: SocketAddr) -> SocketAddr {
+  match dest {
+    SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), 0)),
+    SocketAddr::V6(v6) => {
+      SocketAddr::V6(SocketAddrV6::new(*v6.ip(), 0, v6.flowinfo(), v6.scope_id()))
+    }
+  }
+}
+
+/// Complete a driver's last pending receive so the socket can be closed.
+///
+/// Dropping an in-flight receive does NOT reliably end it on io_uring. The
+/// drop issues ONE best-effort `AsyncCancel` submission-queue entry, and
+/// unlike an ordinary operation push — which drains the queue and retries when
+/// it is full — that push is discarded with a warning if there is no room. The
+/// receive then stays in flight forever, holding a reference to the socket's
+/// shared descriptor, and the `UdpSocket::close` that follows waits on that
+/// last reference and never returns.
+///
+/// Delivering the socket a datagram addressed to itself resolves the receive
+/// instead of cancelling it, which needs no free queue slot at drop time: the
+/// send is awaited, so it drives the runtime to submit and reap, and awaiting
+/// the receive afterwards reaps its completion. A resolved future cancels
+/// nothing when it is dropped, so the close that follows has no reference left
+/// to wait for.
+///
+/// The marker is sent from a THROWAWAY socket, never from the socket being
+/// closed. Every await here is bounded, and an elapsed await drops its future
+/// — which, on both completion-based backends, strands an operation on
+/// whichever socket issued it. Sending from the gossip socket would therefore
+/// strand an operation on the very descriptor the close is waiting on, so a
+/// send that merely ran slow would produce exactly the hang this protocol
+/// exists to prevent. Stranding one on the throwaway socket instead costs a
+/// single descriptor and its ephemeral port, held until the process exits, and
+/// nothing rebinds either.
+///
+/// The received bytes are discarded — the loop has already exited and nothing
+/// further is fed to the endpoint — so the marker is never interpreted, and a
+/// real datagram that happens to arrive first serves equally well.
+///
+/// Returns whether the receive was completed. `false` means the caller is back
+/// on the drop-based path: the receive may still hold the descriptor, so the
+/// close that follows cannot prove the port was released and the shutdown
+/// caller is told so (see [`shutdown_release_reply`]).
+pub(crate) async fn complete_recv_before_close(mut recv: PendingRecv<'_>) -> bool {
+  #[cfg(test)]
+  if force_teardown_fallback() {
+    return false;
+  }
+  let Some(dest) = self_addressed_dest(recv.socket) else {
+    return false;
+  };
+  let Ok(Ok(marker)) =
+    compio::time::timeout(TEARDOWN_STEP_TIMEOUT, UdpSocket::bind(marker_source(dest))).await
+  else {
+    // No source socket, no marker. The bind is a local operation that only
+    // fails when the interface the destination names is gone, in which case
+    // the datagram could not have been delivered either.
+    return false;
+  };
+  for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
+    let sent = compio::time::timeout(
+      TEARDOWN_STEP_TIMEOUT,
+      marker.send_to(TEARDOWN_MARKER.to_vec(), dest),
+    )
+    .await;
+    if !matches!(sent, Ok(BufResult(Ok(_), _))) {
+      // A send can fail outright — or never complete — on a torn-down
+      // interface. Neither is recoverable here, and an elapsed send is treated
+      // as a failed one so the protocol cannot park on it.
+      return false;
+    }
+    // Awaiting the receive is what drives the runtime to submit and reap the
+    // completion. `timeout` borrows the pending future, so an elapsed attempt
+    // drops only the borrow and leaves the operation in flight to be retried.
+    if compio::time::timeout(TEARDOWN_STEP_TIMEOUT, recv.fut().as_mut())
+      .await
+      .is_ok()
+    {
+      return true;
+    }
+  }
+  false
+}
+
+/// Complete a stream driver's pending accept so the listener can be closed.
+///
+/// The listener carries the same hazard as the gossip socket: a pending accept
+/// that is merely DROPPED relies on one best-effort `AsyncCancel` push, which
+/// io_uring discards when its submission queue is full. The orphaned accept
+/// keeps a reference to the listener's shared descriptor, so the port stays
+/// bound — a plain `drop` of the listener then does not release it at all, and
+/// an awaited `close` would wait on that reference forever. A driver that
+/// reports a successful shutdown while still holding the port makes an
+/// immediate rebind fail (`WSAEACCES` on Windows, `AddrInUse` elsewhere).
+///
+/// Connecting to the listener's own address resolves the accept instead of
+/// cancelling it, needing no free queue slot: both the connect and the accept
+/// are awaited, which drives the runtime to submit and reap. The accepted
+/// connection and the connecting side are dropped immediately — the driver
+/// loop has exited and nothing will be served on them.
+///
+/// The dial runs on a FRESH `TcpStream`, independent of the listener, for the
+/// same reason the datagram marker runs on a throwaway socket: the connect is
+/// bounded, and an elapsed connect drops its future, stranding an operation on
+/// whichever socket issued it. On the connecting socket that costs one
+/// descriptor which nothing rebinds; on the listener it would be the hang this
+/// protocol exists to prevent.
+///
+/// A terminated future has already resolved and holds no operation, so there
+/// is nothing to complete and the listener can be closed directly.
+///
+/// Returns whether the listener has no operation left in flight. `false` means
+/// the caller is on the drop-based path: the accept may still hold the
+/// descriptor, so the close that follows cannot prove the port was released
+/// and the shutdown caller is told so (see [`shutdown_release_reply`]).
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+pub(crate) async fn complete_accept_before_close<F>(
+  mut accept: core::pin::Pin<&mut F>,
+  listener: &compio::net::TcpListener,
+) -> bool
+where
+  F: futures_util::future::FusedFuture + ?Sized,
+{
+  #[cfg(test)]
+  if force_teardown_fallback() {
+    return false;
+  }
+  if accept.is_terminated() {
+    return true;
+  }
+  let Ok(local) = listener.local_addr() else {
+    return false;
+  };
+  let Some(dest) = self_addressed(local) else {
+    return false;
+  };
+  for _ in 0..TEARDOWN_MARKER_ATTEMPTS {
+    let Ok(Ok(stream)) =
+      compio::time::timeout(TEARDOWN_STEP_TIMEOUT, compio::net::TcpStream::connect(dest)).await
+    else {
+      // A listener whose address cannot be dialled (a torn-down interface, a
+      // refused loopback connect) leaves nothing to complete the accept with.
+      // An elapsed connect is treated as a failed one so the protocol cannot
+      // park on it.
+      return false;
+    };
+    // Awaiting the accept is what drives the runtime to reap its completion.
+    // `timeout` borrows the pending future, so an elapsed attempt drops only
+    // the borrow and leaves the operation in flight for the next attempt.
+    let done = compio::time::timeout(TEARDOWN_STEP_TIMEOUT, accept.as_mut())
+      .await
+      .is_ok();
+    // Drop the connecting side and anything it was accepted into: the loop has
+    // exited, so neither is served.
+    drop(stream);
+    if done {
+      return true;
+    }
+  }
+  false
+}
+
+/// Close one of a driver's bound sockets and report whether its release was
+/// PROVEN.
+///
+/// `completed` is whether the socket's pending operation was completed rather
+/// than abandoned, as reported by [`complete_recv_before_close`] /
+/// [`complete_accept_before_close`]. The close is awaited under
+/// [`TEARDOWN_CLOSE_TIMEOUT`] either way — it is what releases the port on a
+/// completion-based backend, where a plain drop closes the handle
+/// asynchronously and a same-port rebind races the release.
+///
+/// Release is proven only when BOTH hold: an abandoned operation may still own
+/// the descriptor, and a close that errored or ran out its bound has not been
+/// observed to finish. Either way the caller must not tell the shutdown caller
+/// the port is free.
+pub(crate) async fn close_and_prove_release<F>(completed: bool, close: F) -> bool
+where
+  F: Future<Output = std::io::Result<()>>,
+{
+  let closed = matches!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, close).await,
+    Ok(Ok(()))
+  );
+  completed && closed
+}
+
+/// The reply a driver's teardown owes its shutdown caller, given what each of
+/// its sockets could be proven to have released.
+///
+/// `listener` is the reliable-plane listener's proof, or `None` for a driver
+/// that has no listener (the QUIC driver, whose reliable plane rides the same
+/// UDP socket as gossip). `Ok(())` means every bound port was observed
+/// released, so an immediate rebind on the same address succeeds; anything else
+/// is [`MemberlistError::ShutdownReleaseUnproven`] naming the socket(s) whose
+/// release could not be established. The node is stopped in both cases — the
+/// difference is only whether the caller may rebind straight away.
+pub(crate) fn shutdown_release_reply(
+  listener: Option<bool>,
+  gossip: bool,
+) -> crate::error::Result<()> {
+  let unreleased = match (listener.unwrap_or(true), gossip) {
+    (true, true) => return Ok(()),
+    (false, true) => UnreleasedSocket::Listener,
+    (true, false) => UnreleasedSocket::Gossip,
+    (false, false) => UnreleasedSocket::Both,
+  };
+  Err(crate::error::MemberlistError::ShutdownReleaseUnproven(
+    crate::error::ShutdownReleaseUnproven::new(unreleased),
+  ))
+}
+
+#[cfg(test)]
+thread_local! {
+  /// Test seam: force both completion protocols straight onto the drop-based
+  /// fallback.
+  ///
+  /// The fallback is only reachable behind a torn-down interface or a starved
+  /// submission queue, neither of which a test can stage against a live driver
+  /// without also breaking the machinery it is trying to observe. With this
+  /// set, both helpers report failure having attempted nothing, so a
+  /// driver-level test can assert the reply a teardown sends when it cannot
+  /// prove its sockets were released.
+  static FORCE_TEARDOWN_FALLBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Set the forced-fallback seam for the current thread. The driver task runs on
+/// the thread that spawned it, so a test sets this for its own driver only.
+#[cfg(test)]
+pub(crate) fn set_force_teardown_fallback(on: bool) {
+  FORCE_TEARDOWN_FALLBACK.with(|f| f.set(on));
+}
+
+#[cfg(test)]
+fn force_teardown_fallback() -> bool {
+  FORCE_TEARDOWN_FALLBACK.with(|f| f.get())
 }
 
 #[cfg(test)]

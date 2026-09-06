@@ -254,6 +254,23 @@ pub enum InitError {
   /// `udp_rx_packets` screen and the engine's receive-ring screen are STRICTLY
   /// BELOW it, so a zero cap admits no gossip ring at all. Must be non-zero.
   ZeroGossipReadCap,
+  /// [`Options::max_pending_seeds`](crate::Options::max_pending_seeds) is zero.
+  ///
+  /// The cap is the engine's join-seed queue ceiling, and a seed is queued only
+  /// while the queue is below it, so a zero cap queues nothing: every
+  /// [`join`](crate::Memberlist::join) would return `Ok` having silently dropped
+  /// every seed, and the node could never reach a cluster it was not told about by
+  /// gossip. Must be non-zero.
+  ZeroMaxPendingSeeds,
+  /// [`Options::max_pending_dials`](crate::Options::max_pending_dials) is zero.
+  ///
+  /// The cap bounds how many reliable dials may wait BEYOND what the free TCP pool
+  /// could take, and a dial is admitted only while that excess is below it. Zero
+  /// therefore refuses every dial the pool cannot absorb at once — including the
+  /// first dial made while the pool is momentarily empty — so a node with a busy
+  /// reliable plane could neither join nor send a reliable message. Must be
+  /// non-zero.
+  ZeroMaxPendingDials,
   /// [`Options::ingress_packets_per_poll`](crate::Options::ingress_packets_per_poll)
   /// is zero.
   ///
@@ -415,6 +432,8 @@ impl fmt::Display for InitError {
          (Options::gossip_read_cap)",
       ),
       InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
+      InitError::ZeroMaxPendingSeeds => f.write_str("max_pending_seeds must be non-zero"),
+      InitError::ZeroMaxPendingDials => f.write_str("max_pending_dials must be non-zero"),
       InitError::ZeroIngressPacketsPerPoll => {
         f.write_str("ingress_packets_per_poll must be non-zero")
       }
@@ -427,8 +446,9 @@ impl InitError {
   /// Map an [`Engine`](memberlist_embedded::Engine) construction error into the
   /// driver's [`InitError`].
   ///
-  /// The driver pre-validates the port, gossip MTU, close timeout, and advertise
-  /// address before building the engine, so in practice the engine fails only with
+  /// The driver runs the engine's own config preflight up front and pre-validates
+  /// the port, gossip MTU, close timeout, and advertise address before building the
+  /// engine, so by the time the engine is constructed it fails only with
   /// [`Endpoint`](memberlist_embedded::InitError::Endpoint) (machine init),
   /// [`Encryption`](memberlist_embedded::InitError::Encryption) (an unusable
   /// keyring), or
@@ -445,6 +465,8 @@ impl InitError {
       E::ZeroPort => InitError::ZeroPort,
       E::ZeroCloseTimeout => InitError::ZeroCloseTimeout,
       E::ZeroGossipReadCap => InitError::ZeroGossipReadCap,
+      E::ZeroMaxPendingSeeds => InitError::ZeroMaxPendingSeeds,
+      E::ZeroMaxPendingDials => InitError::ZeroMaxPendingDials,
       E::GossipMtuTooLarge(m) => InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: m.gossip_mtu,
         ceiling: m.ceiling,

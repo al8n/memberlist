@@ -203,6 +203,21 @@ pub fn validate_runtime_config(
     return Err(InitError::ZeroGossipReadCap);
   }
 
+  // Reject a zero join-seed ceiling. `join` admits a seed only while the queue is
+  // below the cap, so zero queues nothing: every `join` would return `Ok` having
+  // silently dropped every seed it was handed.
+  if cfg.max_pending_seeds == 0 {
+    return Err(InitError::ZeroMaxPendingSeeds);
+  }
+
+  // Reject a zero parked-dial ceiling. A dial is admitted only while the excess
+  // over the free pool is below the cap, so zero refuses every dial the pool
+  // cannot absorb at once — including the first one made while the pool is
+  // momentarily empty, which is exactly the case parking exists to serve.
+  if cfg.max_pending_dials == 0 {
+    return Err(InitError::ZeroMaxPendingDials);
+  }
+
   // Validate the encryption keyring before any endpoint exists, so an unusable key
   // is a typed construction error rather than a silent runtime drop of every
   // encrypted gossip datagram. The probe is entropy-free and shared with the
@@ -329,14 +344,67 @@ pub struct Engine<I, C, R = SmallRng> {
   /// not blow a constrained stack and the allocation happens exactly once.
   gossip_recv: std::vec::Vec<u8>,
   /// Seed addresses queued by `join` that have not yet been handed to the
-  /// machine. Drained in the machine-pump phase of each `pump` tick: one
-  /// `start_push_pull(seed, Join, now)` per entry, which queues a `DialRequested`
-  /// the machine immediately services into a `Connect` action consumed later that
-  /// same tick. Keeping the queue on the engine (rather than the reliable plane)
-  /// because join intent is an engine-level policy — the machine drives the
-  /// actual exchange state, while this queue records which seeds are still
-  /// waiting for a first contact attempt.
+  /// machine, bounded by [`Options::max_pending_seeds`] and holding each address
+  /// at most once. Admitted incrementally in the machine-pump phase of each
+  /// `pump` tick — `start_push_pull(seed, Join, now)` for as many as the free pool
+  /// can back, which queues a `DialRequested` the machine immediately services
+  /// into a `Connect` action consumed later that same tick. A queued entry is a
+  /// bare address: no bridge, no encoded state, no deadline, so a seed cannot
+  /// expire while it waits. Keeping the queue on the engine (rather than the
+  /// reliable plane) because join intent is an engine-level policy — the machine
+  /// drives the actual exchange state, while this queue records which seeds are
+  /// still waiting for a first contact attempt. Reserved at its cap at
+  /// construction, so queuing a seed never grows it.
   pending_seeds: VecDeque<SocketAddr>,
+  /// Ranking scratch for [`join`](Self::join), allocated ONCE at construction with
+  /// capacity `max_pending_seeds + 1` and reused by every call.
+  ///
+  /// A call holds at most `free queue slots + 1` candidates — the one past the free
+  /// slots is what names the next rotation — and the ranking sheds its worst
+  /// candidate BEFORE taking a better one, so the length never exceeds that
+  /// capacity at any point of any call, however long the offer. Owning the buffer
+  /// rather than building one per call is what keeps `join` allocation-free on a
+  /// device whose whole heap may be a few kilobytes: the one allocation happens at
+  /// construction, where a driver can account for it.
+  ///
+  /// Emptied at the start of each call, and moved out and back around the ranking
+  /// loop — which needs `&mut self` for the dedup counter — so the reserved
+  /// capacity survives every call.
+  join_window: Vec<(SocketAddr, usize)>,
+  /// Where the next [`join`](Self::join) admission starts in the address order:
+  /// the address of the first seed the previous call had no room for, or `None`
+  /// while no call has yet had to shed anything.
+  ///
+  /// Addresses are totally ordered by [`SocketAddr`] itself, and a call ranks them
+  /// cyclically from this point: every address at or after it first, in ascending
+  /// order, then the addresses before it, also ascending. So the seed the previous
+  /// call turned away ranks first on the next offer, and successive offers sweep
+  /// the whole set round-robin, wrapping back to the smallest address once the
+  /// largest has had its turn. `None` starts that sweep at the smallest address.
+  ///
+  /// The rotation lives here, and not in a driver's retry loop, because the engine's
+  /// admission contract is that the caller re-offers its whole seed list and this
+  /// side dedups the repeats — a caller that had to reorder its own list to get past
+  /// the cap would need to know the cap, and every driver would need the same
+  /// bookkeeping. Admitting in caller order every time admits the same prefix
+  /// forever: a list longer than `max_pending_seeds` drops its tail on every offer,
+  /// so a reachable seed sitting behind one that keeps failing fast is never dialed
+  /// at all, however long the caller retries.
+  ///
+  /// Rotating by ADDRESS rather than by position in the previous list is what makes
+  /// that hold for a list the caller does not present identically every time. A
+  /// positional cursor only rotates while the order holds still: a re-resolution
+  /// that reorders the candidates, or a second caller's differently-ordered offer,
+  /// moves the same index onto a different address, and an offer alternating
+  /// between two orders can land on the failing seed every single time. The order
+  /// here is a property of the addresses alone, so neither reordering nor which
+  /// caller made the offer changes who gets the slot.
+  ///
+  /// One rotation serves the whole engine, and a call advances it only past entries
+  /// that call saw, so the round-robin sweeps whatever is offered together. A driver
+  /// running several join loops offers their union for that reason — see
+  /// [`join`](Self::join).
+  join_rotation: Option<SocketAddr>,
   /// Maps each outbound reliable exchange's [`ExchangeId`] to the [`StreamId`] the
   /// originating `send_reliable` / `join` / probe call returned, captured from the
   /// `Connect` action (which carries both ids). [`poll_event`](Self::poll_event)
@@ -364,6 +432,76 @@ pub struct Engine<I, C, R = SmallRng> {
   /// gates membership admission via the routable-address alive filter, which the
   /// constructor installs with this policy as its inner predicate.
   cidr_policy: CidrFilter,
+  /// Reliable dials the caller requested through [`send_reliable`](Self::send_reliable)
+  /// since the last stream-action drain, which have therefore had their `Connect`
+  /// emitted into the machine's action queue but are not yet in the engine's parked
+  /// set.
+  ///
+  /// `start_user_message` queues its `Connect` synchronously at call time, out of
+  /// pump, so between two pumps the parked set alone under-counts the dial intent
+  /// already committed. Adding this to it makes the admission arithmetic of
+  /// `send_reliable` and of the join-seed drain see the true demand. Reset to zero at
+  /// the end of every `drain_stream_actions`, by which point each of those `Connect`s
+  /// has become a parked connection (or been refused) and is counted there instead.
+  api_dials_since_pump: usize,
+  /// The [`StreamId`]s of the push/pull exchanges the join-seed drain started this
+  /// pump, awaiting their `Connect` in this same tick's action drain.
+  ///
+  /// A `Connect` action carries no origin, so this is how the drain tells a seed's
+  /// dial apart from an application send's or the machine's own: the drain removes
+  /// the matching id and parks the connection with `from_seed` set. Bounded by the
+  /// seed drain itself, which admits at most the free pool plus one head per pump,
+  /// and cleared at the end of every `drain_stream_actions` — every admission made
+  /// this pump has surfaced its `Connect` by then, and one that failed before ever
+  /// reaching a `Connect` never will.
+  seed_stream_ids: MediumVec<StreamId>,
+  /// Count of offered join-seed entries one call had no room to queue: the surplus
+  /// beyond the free queue slots that call found, plus the entry it leaves the
+  /// rotation on.
+  ///
+  /// The room a call has is [`Options::max_pending_seeds`] minus what is already
+  /// queued, so this rises both when a full queue turns a whole offer away and when
+  /// a single over-long offer meets an EMPTY one: 40 distinct routable seeds at the
+  /// default cap of 32 record 8 — the 7 that ranked past the 33-entry window, and
+  /// the one the next offer resumes the rotation from.
+  join_seeds_dropped: u64,
+  /// Count of join seeds skipped because the same address was already queued or
+  /// already had a live (non-`Closing`) JOIN exchange under way. This is the
+  /// retry-loop damper: it counts the duplicate push/pull exchanges — and their
+  /// full-state encodings — that were NOT started. An unrelated user message or
+  /// reliable ping to the address is not counted here and does not suppress the
+  /// seed.
+  join_seeds_deduped: u64,
+  /// Count of admitted join seeds the machine refused to start an exchange for.
+  ///
+  /// `start_push_pull` hands back an inert [`StreamId`] — no intent registered, no
+  /// `Connect` queued, a `DialAborted` event its only trace — when the framed
+  /// request exceeds `max_stream_frame_size` (a membership that outgrew one frame)
+  /// or the endpoint is no longer running. The pump detects it as the absence of a
+  /// `Connect`: a seed whose `StreamId` is still unmatched when the action drain
+  /// ends started nothing, and is counted here. Each such seed is CONSUMED from the
+  /// queue, so a caller's retry-until-joined loop re-offers it (nothing dedups it —
+  /// there is no exchange to dedup against).
+  join_seeds_refused: u64,
+  /// Count of parked dials trimmed after the pump's dial site because more than
+  /// [`Options::max_pending_dials`] of them were still waiting on a pool that could
+  /// back none of them. Each was terminalized through the machine's never-connected
+  /// failure path, so a non-zero value means the node shed dial work under a
+  /// caller-driven backlog. The newest intent is trimmed first, and join seeds stand
+  /// outside the ceiling — neither shed by it nor counted against it — so what this
+  /// counts is protocol-paced dial work and application sends that got past the
+  /// `send_reliable` pre-check, and a join can never make it rise.
+  pending_dial_rejections: u64,
+  /// The most candidates any [`join`](Self::join) call has held in its ranking
+  /// window at once.
+  ///
+  /// The window is bounded by `max_pending_seeds + 1`, and no caller and no counter
+  /// can otherwise observe that bound: an entry inserted past it and popped again
+  /// leaves the admissions and the drop counts identical, and shows up only as a
+  /// growth of the `join_window` capacity construction reserved — the allocation
+  /// the bound exists to avoid on a device that has to.
+  #[cfg(test)]
+  pub(crate) join_window_high_water: usize,
   /// Count of pumps whose gossip view declared a receive capacity at or above the
   /// configured [`Options::gossip_read_cap`].
   ///
@@ -459,6 +597,82 @@ where
   #[inline]
   pub fn teardown_overruns(&self) -> u64 {
     self.plane.teardown_overruns
+  }
+
+  /// Number of join seed addresses queued by [`join`](Self::join) that the pump
+  /// has not yet handed to the machine. Seeds are admitted as the reliable pool
+  /// has room, so a non-zero value simply means discovery intent is still waiting
+  /// on capacity.
+  ///
+  /// A seed LEAVING the queue is not by itself proof that an exchange started: the
+  /// machine can refuse one, and that case is counted separately by
+  /// [`join_seeds_refused`](Self::join_seeds_refused).
+  #[inline]
+  pub fn pending_seed_count(&self) -> usize {
+    self.pending_seeds.len()
+  }
+
+  /// Diagnostic count of offered join-seed entries a call had no room to queue: the
+  /// surplus beyond the free queue slots it found — [`Options::max_pending_seeds`]
+  /// minus what was already queued — plus the entry the rotation resumes from.
+  ///
+  /// A non-zero value therefore means one offer carried more distinct routable
+  /// seeds than the queue could take at that moment, whether because the queue was
+  /// already full or because that single offer was longer than the whole cap: 40
+  /// distinct routable seeds offered to an EMPTY queue at the default cap of 32
+  /// record 8 (the 7 that ranked past the 33-entry window, and the one the next
+  /// offer resumes from).
+  #[inline]
+  pub fn join_seeds_dropped(&self) -> u64 {
+    self.join_seeds_dropped
+  }
+
+  /// Diagnostic count of join seeds skipped because the address was already queued
+  /// or already had a live JOIN exchange under way. This is the retry-loop damper
+  /// made visible: it counts the duplicate join push/pull exchanges — and their
+  /// full-state encodings — that were never started. A user message or reliable
+  /// ping to the same address is a different exchange: it is not counted here, and
+  /// it does not suppress the seed.
+  #[inline]
+  pub fn join_seeds_deduped(&self) -> u64 {
+    self.join_seeds_deduped
+  }
+
+  /// Diagnostic count of admitted join seeds the machine refused to start an
+  /// exchange for — most plainly, a local membership that no longer fits one
+  /// `max_stream_frame_size` frame, which an identically-configured peer would
+  /// reject before decoding.
+  ///
+  /// Such a seed leaves the queue and produces no dial: no `Connect`, no parked
+  /// connection, and nothing counted by [`pending_seed_count`](Self::pending_seed_count)
+  /// or [`join_seeds_dropped`](Self::join_seeds_dropped). The retry-until-joined
+  /// loop re-offers it — there is no exchange in flight to dedup it against — so a
+  /// steadily rising value on a node that never joins is the signal that the frame
+  /// cap, not reachability, is what is blocking it.
+  #[inline]
+  pub fn join_seeds_refused(&self) -> u64 {
+    self.join_seeds_refused
+  }
+
+  /// Diagnostic count of parked dials trimmed by the parked-dial ceiling
+  /// ([`Options::max_pending_dials`]) and terminalized as failures instead of left
+  /// parked. The ceiling is a HARD post-pump bound on caller- and
+  /// protocol-originated parked dials: it is enforced after the pump's dial site has
+  /// spent every free slot, newest intent first, so at most `max_pending_dials` of
+  /// them are parked once any pump returns. Join seeds stand outside it (at most one
+  /// head waits past measured capacity), so a join can never make this rise.
+  ///
+  /// What it counts is every OTHER dial source shed under a caller-driven backlog:
+  /// protocol-paced work (a periodic push/pull, a reliable-ping fallback) and the
+  /// application sends that got past the [`send_reliable`](Self::send_reliable)
+  /// pre-check. That pre-check is a call-site signal, not the authority — it credits
+  /// the slots free at call time to the backlog, and a pump that spends one of them
+  /// elsewhere (the listener replenishing itself, an older seed head taking one in
+  /// the dial FIFO) leaves more parked than the check admitted for. A send shed here
+  /// reports through its `ExchangeCompleted { Failed }` like any other dial failure.
+  #[inline]
+  pub fn pending_dial_rejections(&self) -> u64 {
+    self.pending_dial_rejections
   }
 
   /// Diagnostic count of pumps whose gossip view declared a receive capacity at
@@ -809,27 +1023,270 @@ where
 
   /// Record intent to join the cluster via these seed addresses.
   ///
-  /// Returns immediately; the pump loop initiates a push/pull state exchange to
-  /// each seed on the next tick. The caller should watch `is_joined()` or drain
-  /// `poll_event()` for `Event::PushPullReplyReceived` / membership changes, and
-  /// enforce its own join deadline — this method performs no I/O and imposes no
-  /// timeout. Returns `NotRunning` after `leave()`: a left node initiates no new
-  /// join.
+  /// Returns immediately; the pump admits queued seeds to the machine as the
+  /// reliable pool has room, one push/pull state exchange per admitted seed. The
+  /// caller should watch `is_joined()` or drain `poll_event()` for
+  /// `Event::PushPullReplyReceived` / membership changes, and enforce its own join
+  /// deadline — this method performs no I/O and imposes no timeout. Returns
+  /// `NotRunning` after `leave()`: a left node initiates no new join.
+  ///
+  /// # Admission
+  ///
+  /// A seed is queued only if it is a routable destination, is not already queued,
+  /// and has no live join exchange already under way to that address. Everything
+  /// else is dropped and counted, and the call still returns `Ok`: a seed list is
+  /// best-effort discovery intent, not a delivery request, so the natural
+  /// retry-until-`is_joined()` loop can call this every tick without accumulating
+  /// work. Each skip is visible through
+  /// [`join_seeds_deduped`](Self::join_seeds_deduped) and
+  /// [`join_seeds_dropped`](Self::join_seeds_dropped). The dedup is scoped to join
+  /// intent alone: an unrelated user message or reliable ping to a seed address
+  /// does not suppress the seed, since it is a different exchange and would leave
+  /// the join with nothing outstanding.
+  ///
+  /// Which seeds a full queue keeps depends only on the SET of addresses offered.
+  /// Addresses are totally ordered by [`SocketAddr`] itself, and a call ranks them
+  /// cyclically from the rotation: every address at or after it first, ascending,
+  /// then the addresses before it, also ascending. A call admits the lowest-ranked
+  /// entries it has room for, and the rotation then moves to the first entry it had
+  /// no room for, so that entry ranks first next time. Distinct addresses never tie,
+  /// so no two of them can share a turn: the order is over the address itself, down
+  /// to an IPv6 address's `flowinfo` and `scope_id`.
+  ///
+  /// Repeated offers of ONE address set therefore admit its entries round-robin over
+  /// that order, and the bound is over the offers that CARRY CAPACITY: every address
+  /// of a re-offered set `S` is admitted within `⌈|S| ÷ r⌉` offers that each find at
+  /// least `r` free queue slots. An offer that finds the queue FULL admits nothing —
+  /// it sheds every entry it ranked and leaves the rotation on the lowest-ranked of
+  /// them — so it neither counts toward that bound nor costs the set a turn. That
+  /// lowest-ranked entry is the one that already ranked first whenever it is still a
+  /// candidate; when it is not — it is already queued, or a JOIN exchange to it is
+  /// already under way — the rotation advances to the lowest-ranked entry that is,
+  /// and the entry it passed over is one already being served rather than one that
+  /// lost a turn. No reachable seed can therefore be starved behind one that keeps
+  /// failing, however the caller orders the list, however a re-resolution reorders
+  /// it, and however many offers meet a full queue.
+  ///
+  /// That bound is over the addresses offered TOGETHER, because the rotation is
+  /// engine-wide and a call can only advance it past the entries that call saw. A
+  /// driver or application running several join loops must therefore offer the
+  /// UNION of their lists: `memberlist-embassy`'s run loop does, offering every live
+  /// join future's seeds as one list, and `memberlist-smoltcp`'s asks its caller for
+  /// one merged list. Two loops that instead offer DISJOINT sets larger than the
+  /// queue cap alternately share the one rotation while neither ever names the
+  /// other's addresses, so each defers the other's turns — and for an interleaving
+  /// whose dials all fail inside the very pump that made them, indefinitely. What
+  /// softens it short of that is the dedup above: a seed admitted from one set stays
+  /// deduped for the life of its exchange, so a dial that takes any time at all
+  /// leaves the turns in between to the addresses that have not been tried.
+  ///
+  /// Both counters count offered ENTRIES, not distinct addresses, so what a caller
+  /// reads back reconciles against the length of the list it passed: every entry is
+  /// queued, deduped, dropped, or non-routable, and exactly one of those. One
+  /// address repeated within a single offer is therefore counted once per
+  /// repetition — as [`join_seeds_deduped`](Self::join_seeds_deduped) for a repeat
+  /// the call is still holding that address for, and as
+  /// [`join_seeds_dropped`](Self::join_seeds_dropped) for one that ranks past
+  /// everything the call has room to consider. Only a non-routable entry is counted
+  /// as neither.
+  ///
+  /// A call holds at most `free queue slots + 1` candidates at a time — the one
+  /// beyond the free slots is what names the next rotation — so the ranking never
+  /// needs room for more than `max_pending_seeds + 1` addresses however long the
+  /// offer is. A full window sheds its worst candidate BEFORE it takes a better one,
+  /// so that bound holds at every point of the call rather than only between
+  /// entries. The engine owns ONE buffer of exactly that capacity, reserved at
+  /// construction and reused: no `join` allocates.
+  ///
+  /// An offer of `n` entries costs
+  /// `O(n × (queued seeds + live connections + free queue slots))`: every routable
+  /// entry is checked against the seed queue and against the connection table before
+  /// it is ranked against the candidates the call is holding. That connection scan
+  /// covers the WHOLE table, parked `PendingDial` entries included, so the population
+  /// it walks is the reliable pool size (every slot-holding connection) plus what the
+  /// last pump left parked: at most [`Options::max_pending_dials`] caller- and
+  /// protocol-originated dials, the ceiling the pump enforces after its dial site,
+  /// plus the seeds the engine itself admitted against measured capacity and at most
+  /// one head past it — a seed surplus bounded by the pool plus one.
+  /// Queued seeds and free slots are both bounded by [`Options::max_pending_seeds`],
+  /// so the per-offer cost on this tier is
+  /// `O(n × (max_pending_seeds + pool + max_pending_dials))` — none of which grows
+  /// with the size of the cluster or with how often the caller retries.
+  ///
+  /// # Ordering
+  ///
+  /// A queued seed waits behind at most the dials that were already outstanding
+  /// when the pump admitted it, never behind ones requested later. The pump admits
+  /// as many seeds as the pool can immediately back, plus the queue's head, which
+  /// becomes a real exchange so it holds a place in the machine's dial order ahead
+  /// of every later request — otherwise a steady stream of
+  /// [`send_reliable`](Self::send_reliable) calls could take every freed slot ahead
+  /// of a seed indefinitely.
+  ///
+  /// This is an ordering guarantee, not a delivery one. That head owns an exchange
+  /// deadline from the moment it is admitted, so it can still expire while it waits
+  /// behind older exchanges; the retry loop above re-offers it. The rest of the
+  /// queue stays as bare addresses, which cannot expire while they wait.
   pub fn join(&mut self, seeds: &[SocketAddr]) -> Result<(), memberlist_proto::Error> {
     // A left node initiates no new join — the machine merges no remote state
     // during the graceful-leave drain, so queued seeds could never take effect.
     // Reject rather than enqueue work the pump would skip.
     self.ensure_running()?;
-    for s in seeds {
-      // Drop a non-routable seed (unspecified/multicast/broadcast IP or port 0):
+
+    // Nothing offered: no seed to admit, and no unserved entry to rotate onto.
+    if seeds.is_empty() {
+      return Ok(());
+    }
+
+    // Admit by RANK, not by position. An entry's rank is its own address taken
+    // cyclically from the rotation, so which entries a full queue keeps depends only
+    // on the SET of addresses offered — never on the order this caller listed them
+    // in, nor on which caller offered them.
+    //
+    // One pass keeps the best `room + 1` candidates in rank order. The entry beyond
+    // `room` is what names the next rotation, so identifying it costs no second pass
+    // over the offer, and holding only that many keeps the ranking within the
+    // engine's reserved scratch however long the offer is. The caller's list is
+    // never reordered.
+    let room = self
+      .cfg
+      .max_pending_seeds
+      .saturating_sub(self.pending_seeds.len());
+    let window = room.saturating_add(1);
+    // Read once: every rank in this call is taken from the same point, and the
+    // rotation only moves after the whole offer has been ranked against it.
+    let rotation = self.join_rotation;
+    // Move the scratch out for the ranking loop, which also needs `&mut self` for
+    // the dedup counter, and put it back before returning — the one return below is
+    // the only exit, so the reserved capacity always comes home. Construction sized
+    // it to `max_pending_seeds + 1`, and `window` never exceeds that, so the loop
+    // cannot grow it.
+    let mut best = core::mem::take(&mut self.join_window);
+    best.clear();
+
+    for (idx, seed) in seeds.iter().enumerate() {
+      // Skip a non-routable seed (unspecified/multicast/broadcast IP or port 0):
       // it could only produce a doomed dial — the link layer's `connect` rejects
       // the unspecified address and port 0, and the rest are addresses no dial can
-      // usefully reach. Queue only seeds a dial can actually complete.
-      if socket_addr_is_routable(s) {
-        self.pending_seeds.push_back(*s);
+      // usefully reach. Queue only seeds a dial can actually complete. Discarded
+      // silently and counted as neither shed nor duplicate: it is a malformed seed
+      // rather than load the cap turned away.
+      if !socket_addr_is_routable(seed) {
+        continue;
+      }
+
+      if !self.is_join_candidate(seed) {
+        self.join_seeds_deduped += 1;
+        continue;
+      }
+
+      // A repeat of an address this call is already holding consumes no second
+      // slot, and is a duplicate rather than shed load.
+      if best.iter().any(|(held, _)| held == seed) {
+        self.join_seeds_deduped += 1;
+        continue;
+      }
+
+      let rank = cyclic_rank(seed, rotation);
+      let at = best.partition_point(|(held, _)| cyclic_rank(held, rotation) < rank);
+      if best.len() == window {
+        // The window is full, so one of the two — this entry or the worst one held —
+        // has to go. Shed it and count it rather than failing the call: the return
+        // type carries no fitting variant, and truncating best-effort discovery
+        // intent is preferable to rejecting a whole seed list because part of it did
+        // not fit. The cap only bites on more distinct routable seeds at once than a
+        // small reliable pool could service within any sane join deadline.
+        self.join_seeds_dropped += 1;
+        // `at == window` only when the buffer is full and this entry ranks below
+        // every entry in it, since `at <= best.len() <= window` always. Then the
+        // entry shed is this one; otherwise it is the worst entry held, which this
+        // insert would push off the end of the window anyway.
+        if at == window {
+          continue;
+        }
+        // Shed FIRST, then insert. Inserting into a full window and popping after
+        // would hold `window + 1` candidates — `max_pending_seeds + 2` — breaching
+        // the bound this loop is documented to keep, and growing the scratch past
+        // the capacity construction reserved for it: an allocation, on the entry
+        // that overflows it, on a device the bound exists to keep allocation-free.
+        best.pop();
+      }
+
+      best.insert(at, (*seed, idx));
+
+      // The window's bound is invisible from outside the call, so record what it
+      // actually reached for the test that pins it.
+      #[cfg(test)]
+      {
+        self.join_window_high_water = self.join_window_high_water.max(best.len());
       }
     }
+
+    // Only a call that actually shed a seed moves the rotation, and it moves to the
+    // lowest-ranked seed it had no room for: that seed ranks first on the next
+    // offer, so it is admitted ahead of every other entry, and successive offers
+    // sweep the whole address set. A call that fit everything it offered leaves the
+    // rotation alone — there is no unserved entry to resume from, and moving it
+    // would rotate an offer that never needed rotating.
+    //
+    // With `room == 0` the window is 1, so the single best candidate IS the entry
+    // beyond the room: it is shed, it becomes the rotation, and nothing is queued.
+    if best.len() > room {
+      let (unserved, _) = best[room];
+      self.join_seeds_dropped += 1;
+      self.join_rotation = Some(unserved);
+      best.truncate(room);
+    }
+
+    // Queue the admitted seeds in the order the caller listed them. Rank decides
+    // WHICH entries a full queue keeps; the caller's own order still decides the
+    // order they are dialed in, so a call that sheds nothing leaves the dial order
+    // exactly as it was offered.
+    best.sort_unstable_by_key(|&(_, idx)| idx);
+    for &(addr, _) in best.iter() {
+      self.pending_seeds.push_back(addr);
+    }
+
+    // Return the scratch with its capacity intact so the next call ranks into the
+    // same allocation.
+    best.clear();
+    self.join_window = best;
     Ok(())
+  }
+
+  /// Whether this seed address still needs a place in the join queue.
+  ///
+  /// False once the address is already queued: `join(&[a, a, a])` — or a caller
+  /// re-offering its whole seed list — must not turn one address into several
+  /// exchanges, and the queue is address-keyed, so it holds each destination at
+  /// most once.
+  ///
+  /// False, too, while a JOIN exchange to this address is already under way: a
+  /// second push/pull toward it would re-encode the WHOLE local membership for a
+  /// peer we are mid-exchange with, and would collide at that peer's single
+  /// reliable listener anyway (the second dial is RST during the first's handshake
+  /// — see [`send_reliable`](Self::send_reliable)). This is what bounds the retry
+  /// loop: at most one join exchange per seed address is in flight at a time, so
+  /// full-state encodings scale with completed exchanges, not with call rate.
+  /// `Closing` is excluded because the machine has already finished that exchange,
+  /// so a fresh attempt is legitimate.
+  ///
+  /// Scoped to join intent — `from_seed` — and NOT to any connection that happens
+  /// to share the address. A user message or reliable ping to a seed is a different
+  /// exchange with a different purpose: suppressing the seed against it discards
+  /// the join outright (the call still returns `Ok`) and leaves a caller awaiting
+  /// `is_joined()` with no attempt outstanding at all, until its own timeout. What
+  /// the wider predicate bought was avoiding a dial that collides in the peer's
+  /// handshake window; that collision merely fails the dial, and the caller's retry
+  /// loop re-offers the seed — the same caveat `send_reliable` already documents
+  /// for concurrent reliable streams to one peer.
+  fn is_join_candidate(&self, seed: &SocketAddr) -> bool {
+    !self.pending_seeds.contains(seed)
+      && !self
+        .plane
+        .connections
+        .values()
+        .any(|c| c.from_seed && c.peer == *seed && c.state != ConnState::Closing)
   }
 
   /// Queue an application user-data payload for piggyback gossip to peers.
@@ -861,6 +1318,11 @@ where
     // Drop any seeds still queued from a pre-leave join: the drain initiates no
     // new push/pull, so they must not dial once we begin leaving.
     self.pending_seeds.clear();
+    // Forget the out-of-pump send tally with them. It exists to make the admission
+    // arithmetic see dial intent the parked set does not yet hold, and nothing it
+    // counted can be admitted again — a left node starts no dial — so carrying it
+    // would only inflate the demand a later pump measures against.
+    self.api_dials_since_pump = 0;
     self.endpoint.leave(now)
   }
 
@@ -1101,6 +1563,24 @@ where
   }
 }
 
+/// Where `addr` falls in the join-admission cycle that starts at `rotation`.
+///
+/// [`SocketAddr`] is totally ordered, so the addresses of one offer lay out on a
+/// line; the rotation cuts that line and joins the two halves into a cycle. The
+/// leading `bool` is that cut — `false` for the addresses at or after the
+/// rotation, `true` for the ones before it, so the first half sorts ahead of the
+/// wrapped-around second half — and the address itself orders within each half.
+/// With no rotation the cycle simply starts at the smallest address.
+///
+/// Comparing the addresses themselves rather than a digest of them is what makes
+/// the order a strict one: [`Ord`] here agrees with [`Eq`] down to an IPv6
+/// address's `flowinfo` and `scope_id`, so two distinct destinations can never
+/// share a rank, and neither can starve the other by taking its turn forever.
+#[inline]
+fn cyclic_rank(addr: &SocketAddr, rotation: Option<SocketAddr>) -> (bool, SocketAddr) {
+  (rotation.is_some_and(|from| *addr < from), *addr)
+}
+
 // Construction and reliable-plane diagnostics — the connection handle `C` is
 // only stored (never moved by value or used to key a map here), so these need
 // node identity alone.
@@ -1306,13 +1786,14 @@ where
       Box::new(|_: &SocketAddr| -> Option<std::string::String> { None }),
       Box::new(|addr: &SocketAddr| *addr),
     );
-    // A pump feeds every reliable connection (phase 3) and every synchronous
-    // dial rejection (1c and 7) before its single machine tick (step 6). None
-    // of those feeds may run the membership sweep in between: a refutation
-    // carried by a later connection of the same pump — or by a later 4 KiB
-    // chunk of the same connection, which the phase-3 read loop feeds
-    // separately — would land after the sweep had already turned the suspicion
-    // it refutes into a `Dead`. With the sweep confined to step 6, and with no
+    // A pump feeds every reliable connection (phase 3) before its single machine
+    // tick (step 6). None of those feeds may run the membership sweep in
+    // between: a refutation carried by a later connection of the same pump — or
+    // by a later 4 KiB chunk of the same connection, which the phase-3 read loop
+    // feeds separately — would land after the sweep had already turned the
+    // suspicion it refutes into a `Dead`. The same setting also keeps the
+    // synchronous dial rejections of phase 7 from sweeping a SECOND time in the
+    // tick that has already swept. With the sweep confined to step 6, and with no
     // early exit between phase 3 and it, every pump sweeps exactly once, after
     // all of its evidence. Evidence-driven transitions are untouched: they
     // still apply at the instant of the feed that carries them.
@@ -1331,16 +1812,33 @@ where
       .set_checksum_options(transform.checksum)
       .map_err(InitError::Checksum)?;
 
+    // Reserve both join-admission buffers at their configured bounds, so the join
+    // path allocates here — once, where a driver can account for it — and never on a
+    // `join` or a pump. The queue holds at most `max_pending_seeds` addresses, and
+    // the ranking window at most one more (the entry that names the next rotation).
+    let pending_seeds = VecDeque::with_capacity(cfg.max_pending_seeds);
+    let join_window = Vec::with_capacity(cfg.max_pending_seeds.saturating_add(1));
+
     Ok(Self {
       endpoint,
       cfg,
       plane: ReliablePlane::new(),
       gossip_recv,
-      pending_seeds: VecDeque::new(),
+      pending_seeds,
+      join_window,
+      join_rotation: None,
       outbound_stream_ids: HashMap::new(),
       last_completed_send: None,
       label,
       cidr_policy,
+      api_dials_since_pump: 0,
+      seed_stream_ids: MediumVec::new(),
+      join_seeds_dropped: 0,
+      join_seeds_deduped: 0,
+      join_seeds_refused: 0,
+      #[cfg(test)]
+      join_window_high_water: 0,
+      pending_dial_rejections: 0,
       gossip_over_cap_pumps: 0,
     })
   }
@@ -1614,9 +2112,10 @@ where
   /// (`abort` → `Aborting` → the reap frees it once the RST egress is
   /// acknowledged) and a fresh listener is re-acquired from the pool, minting the
   /// NEXT generation. Expressing the reap as an occupancy retire+reacquire — not a
-  /// raw re-listen — is what closes #161 for the listener too: re-`listen`ing a
-  /// socket whose abort RST has not yet egressed would suppress that RST (the
-  /// link layer's `listen` resets the socket and clears the pending reset).
+  /// raw re-listen — is what keeps the listener's aborted socket from being
+  /// reused before its RST has egressed: re-`listen`ing a socket whose abort
+  /// RST has not yet egressed would suppress that RST (the link layer's
+  /// `listen` resets the socket and clears the pending reset).
   ///
   /// A no-op when there is no listener or its socket is still open (a healthy
   /// `Listen`, or an in-progress half-open the accept path handles).
@@ -2221,6 +2720,21 @@ where
   /// `poll_event`, then send the next. Concurrent reliable streams to one peer
   /// would collide at the listener (the second SYN is RST'd during the first's
   /// handshake).
+  ///
+  /// # Backpressure
+  ///
+  /// Returns [`Error::UserDialBacklogFull`](memberlist_proto::Error::UserDialBacklogFull)
+  /// when caller- and protocol-originated dials are already waiting
+  /// [`Options::max_pending_dials`] beyond what the free pool could take. That is
+  /// admission control on this node's OWN application load — backpressure, not a
+  /// delivery failure: the payload is not queued and nothing is retried for you, so
+  /// pace the sends and try again once outstanding exchanges complete. The carried
+  /// limit is the node-wide parked-dial ceiling. A parked join seed is not part of
+  /// it — the engine admits seeds against its own measured pool capacity — so a node
+  /// that is joining never spends the caller's budget.
+  ///
+  /// The lifecycle answer always wins: a left node reports `NotRunning` however
+  /// full its backlog is, because no amount of pacing will let it send again.
   #[inline]
   pub fn send_reliable(
     &mut self,
@@ -2228,7 +2742,48 @@ where
     payload: bytes::Bytes,
     now: Instant,
   ) -> Result<StreamId, memberlist_proto::Error> {
-    self.endpoint.start_user_message(to, payload, now)
+    // Lifecycle before backpressure. Both refuse the send, but they tell the caller
+    // opposite things: `UserDialBacklogFull` is retryable self-backpressure, while
+    // `NotRunning` is terminal. A left node whose backlog happens to be saturated
+    // must not answer the retryable one and invite a caller to keep trying — the
+    // backlog it is measured against can never drain, since `leave` stops the
+    // schedulers and the machine starts no new exchange.
+    self.ensure_running()?;
+
+    // Refuse before the machine builds an exchange it could only park: encoding the
+    // payload into a bridge whose dial the action drain would then refuse costs a
+    // frame's worth of work and gives the caller a completion event instead of an
+    // answer at the call site. The parked set alone under-counts demand between
+    // pumps — `start_user_message` queues its `Connect` synchronously — so the
+    // already-committed API dials are added in.
+    //
+    // What is measured is the caller- and protocol-originated parked dials only. A
+    // parked join seed is the engine's OWN admission against measured pool
+    // capacity — it is holding the seed queue's place in the dial order, ahead of
+    // this very send — so charging it to the caller would refuse a send merely
+    // because the node happened to be joining.
+    //
+    // The excess over the free slots is the right arithmetic HERE, where the hard
+    // ceiling's is not yet available: those free slots are spent on this very
+    // backlog, oldest-first, before anything new can park, so a send that fits
+    // within them is not backlog at all. The ceiling itself is the post-pump
+    // authority — applied to every dial source after the pump's dial site, over what
+    // the pool could not back — so this is the call-site signal, not the answer. A
+    // send admitted here can still be shed there if the free slots went elsewhere
+    // (the listener replenishing itself from the pool, an older seed head taking one
+    // in the dial FIFO), and then reports through its `ExchangeCompleted { Failed }`
+    // like any other dial failure.
+    let cap = self.cfg.max_pending_dials;
+    let committed = self.plane.pending_non_seed_dial_count() + self.api_dials_since_pump;
+    if committed.saturating_sub(self.plane.pool.free_len()) >= cap {
+      return Err(memberlist_proto::Error::UserDialBacklogFull(
+        memberlist_proto::UserDialBacklogFull::new(to, cap),
+      ));
+    }
+    let sid = self.endpoint.start_user_message(to, payload, now)?;
+    // Count only an accepted send: a rejected one queued no Connect.
+    self.api_dials_since_pump += 1;
+    Ok(sid)
   }
 }
 
@@ -2269,15 +2824,15 @@ where
   /// 3. **Reliable ingress pump** — drain each connection's rx into
   ///    `handle_transport_data`; deliver a one-shot EOF on peer FIN. These
   ///    feeds do not advance membership time.
-  /// 1c. **Rebalance** — self-heal a missing listener, then assign any remaining
-  ///    free slots to deferred dials (listener-first).
-  /// 5. **Join-seed drain** — `start_push_pull(seed, Join, now)` per queued seed.
+  /// 1c. **Listener self-heal** — re-arm a still-missing listener from the pool.
+  /// 5. **Join-seed drain** — `start_push_pull(seed, Join, now)` per admitted seed.
   /// 6. **Machine tick** — `handle_timeout` fires due timers; the pump's
   ///    single membership sweep.
-  /// 7a–7e. **Stream actions + egress** — drain `poll_action`, promote, pump
-  ///    outbound, flush deferred FINs, complete `Closing` drains, re-rebalance,
-  ///    then drain + send outbound gossip.
-  /// 8. **Deadline** — `min(machine_next, closing_next, gossip_more)`.
+  /// 7a–7e. **Stream actions + egress** — drain `poll_action` (every `Connect`
+  ///    parks), promote, pump outbound, flush deferred FINs, complete `Closing`
+  ///    drains, rebalance (the pump's SOLE dial site), trim what is still parked to
+  ///    its ceiling, then drain + send outbound gossip.
+  /// 8. **Deadline** — `min(machine_next, closing_next, gossip_more, seeds_waiting)`.
   ///
   /// # Observation is the read
   ///
@@ -2309,7 +2864,8 @@ where
   ///
   /// The reliable plane holds the same property. The coordinator is built with
   /// its feeds not advancing membership time, so no phase-3 feed — and no
-  /// synchronous dial rejection at 1c or 7 — runs the membership sweep. Step 6
+  /// synchronous dial rejection at 7d'' or parked-dial trim at 7d''' — runs the
+  /// membership sweep. Step 6
   /// is the pump's only sweep, and it sees every gossip datagram and every
   /// reliable byte, EOF and transport fault this pump observed, including the
   /// second and later `READ_BUF` chunks of one connection. So no refutable
@@ -2336,16 +2892,14 @@ where
     // listener gets first claim on a free slot and a deferred outbound dial takes
     // only what remains. The whole reliable plane can be driven from a single
     // spare slot, so an inbound peer must never be starved of a slot by outbound
-    // intent. The two steps below run in this exact order:
+    // intent. The listener steps run in this exact order:
     //
-    //   1b. `check_listener`  — consume an accept-ready listener + replenish
-    //   1c. `rebalance_pool`  — self-heal a missing listener, then deferred dials
-    //                           take any remaining slots (listener-first)
+    //   1b. `check_listener`   — consume an accept-ready listener + replenish
+    //   1c. `ensure_listener`  — self-heal a still-missing listener
     //
     // They are no longer adjacent: the two ingress feeds (phases 2 and 3) run
-    // between them, because `rebalance_pool` reaches the machine's synchronous
-    // dial-rejection path and `1b` does not. Their relative order — and with it
-    // listener priority — is unchanged.
+    // between them. Deferred dials take what the listener leaves, but only at
+    // 7d'', after the machine tick — see 1c.
     //
     // 1b. Accept an inbound connection completed on the listener and replenish the
     // listener from the pool.
@@ -2492,39 +3046,93 @@ where
     // inbound bytes (including the peer-FIN EOF) when firing timers.
     self.pump_inbound_reliable(now, stream);
 
-    // 1c. Self-heal a still-missing listener, then assign any remaining free slots
-    // to deferred dials (listener-first). This runs the SAME rebalance as the late
-    // call after the in-tick frees below (step 7), here over whatever
-    // `reap_retiring` freed plus the spare pool. Running it BEFORE the machine tick
-    // (step 6) is required: a `PendingDial` deferred on a PRIOR tick must be
-    // assigned a freed slot and dialed before step 6's `handle_timeout` could
-    // elapse its bridge and tear it down — so the early site cannot move later.
-    // Running it AFTER both evidence feeds keeps the other direction ordered too:
-    // a dial this call rejects synchronously (a CIDR-blocked or unroutable peer)
-    // terminalizes through the machine, and the coordinator's feeds are the paths
-    // whose membership-sweep the pump has confined to step 6 — so keeping the
-    // rejection behind this pump's gossip and reliable evidence holds the phase
-    // order together independently of that setting. A prior-tick `PendingDial`
-    // parked here is unaffected by the two feeds: they mark only their own bridges
-    // dirty, and a parked dial's bridge has no residual work, so nothing between 1b
-    // and here can elapse it.
-    self.rebalance_pool(now, stream);
+    // 1c. Self-heal a still-missing listener over whatever `reap_retiring` freed
+    // plus the spare pool. Listener ONLY: no dial is issued here, and this call
+    // reaches no machine path at all.
+    //
+    // Dials are issued exclusively by the late rebalance (7d''), AFTER the machine
+    // tick. Assigning a slot here instead would put the engine's scheduling ahead of
+    // the machine's expiry judgment: a `PendingDial` whose exchange deadline has
+    // already elapsed at `now` would take a slot and issue a SYN that step 6 then
+    // fails and 7a immediately RSTs, pinning the slot through a whole teardown cycle
+    // instead of leaving it for the next viable dial. Dialing first saves nothing in
+    // the other direction either — `connect` does not touch the bridge, so an
+    // exchange whose deadline has elapsed is doomed by step 6 at this same instant
+    // whichever order the two run in.
+    //
+    // The listener self-heal keeps its early slot because it is pure engine state:
+    // `check_listener` replenishes only on the accept path, so a listener lost to a
+    // rejected accept (or to a reaped slot) is re-armed here at the front of the
+    // tick, and the whole phase stays LISTENER-FIRST — this call claims at most one
+    // slot before 7d'' hands the rest to deferred dials.
+    self.ensure_listener(stream);
 
-    // 5. Drain join seeds: each seed queued by `join()` gets a push/pull exchange
-    // initiated now. `start_push_pull` internally calls `service_dials` +
-    // `flush_outbound`, queuing a `Connect` action that step 7a below will consume
-    // this same tick, so the first TCP dial bytes are emitted without requiring an
-    // additional pump.
+    // 5. Admit join seeds INCREMENTALLY: a queued seed becomes a push/pull exchange
+    // only when a pool slot is actually free for it. `start_push_pull` internally
+    // calls `service_dials` + `flush_outbound`, queuing a `Connect` action that step
+    // 7a below will consume this same tick, so an admitted seed's first TCP dial
+    // bytes are emitted without requiring an additional pump.
+    //
+    // Admitting the WHOLE queue at once would encode the entire local membership
+    // once per seed and register one bridge and deadline per seed, however small the
+    // pool: with a 2-slot pool and N seeds, N−2 of those encodings could never reach
+    // a peer before their deadline elapsed. Admitting to capacity instead leaves the
+    // surplus as bare addresses — no bridge, no encoding, no deadline — and, because
+    // an admitted seed's deadline is created at admission, a seed can never sit
+    // pre-expired waiting for a slot.
+    //
+    // Capacity is the free pool minus what is already owed: dials parked from an
+    // earlier tick (they are older, and 7d'' serves them first) and the reliable
+    // sends the caller made since the last action drain (their `Connect`s are already
+    // in the machine's queue but not yet in the parked set). Subtracting both keeps
+    // seeds behind older intent.
+    //
+    // Then ONE seed past that: the queue's head, admitted so long as no seed is
+    // parked already. Bulk admission alone cannot make progress against a caller
+    // that keeps sending, because a seed left as a bare address is not in the
+    // machine's `ExchangeId` order at all — every send issued between two pumps
+    // gets an `ExchangeId` older than the seed's would be, parks ahead of it, and
+    // takes the next freed slot at 7d'', while the in-tick frees never leave spare
+    // capacity for the seed at the next phase 5. The head instead becomes a real
+    // exchange now, so 7d''s ascending-`ExchangeId` drain hands it the next free
+    // slot ahead of every dial requested after this pump.
+    //
+    // That is the ordering guarantee: a queued seed waits behind at most the dials
+    // issued before its admission, never behind later ones. It is not a delivery
+    // guarantee — the head owns an exchange deadline from the moment it is
+    // admitted, so it can still expire while parked behind older exchanges, and the
+    // caller's retry-until-joined loop re-offers it. Exactly one head at a time
+    // keeps that exposure to a single seed: the rest of the queue stays as bare
+    // addresses that cannot expire while they wait.
+    //
+    // Note that the bulk seeds admitted just above are NOT parked yet at the moment
+    // `has_parked_seed` is consulted — their `Connect`s drain at 7a — and that is
+    // intended: they were admitted against real free slots and will be dialed, so
+    // they are not what the head is holding a place for.
     //
     // Skip the drain once leaving/left: `join()` rejects post-leave and `leave()`
     // clears the queue, so this guards the one site that dials against ever
     // initiating a join push/pull the machine would merge nothing from.
     if self.endpoint.is_running() {
-      while let Some(seed) = self.pending_seeds.pop_front() {
-        // StreamId is the machine's correlation token for this exchange. The dial is
-        // correlated via the ExchangeId carried in the resulting Connect action, not
-        // by the StreamId; the driver does not need to retain it.
-        let _sid = self.endpoint.start_push_pull(seed, PushPullKind::Join, now);
+      let spare = self
+        .plane
+        .pool
+        .free_len()
+        .saturating_sub(self.plane.pending_dial_count() + self.api_dials_since_pump);
+      for _ in 0..spare {
+        let Some(seed) = self.pending_seeds.pop_front() else {
+          break;
+        };
+        self.admit_seed(seed, now);
+      }
+
+      // The emptiness check is not redundant with the pop: it keeps the common case
+      // — no seeds queued at all — from paying for the parked-set scan.
+      if !self.pending_seeds.is_empty()
+        && !self.plane.has_parked_seed()
+        && let Some(head) = self.pending_seeds.pop_front()
+      {
+        self.admit_seed(head, now);
       }
     }
 
@@ -2563,34 +3171,62 @@ where
     // FINs the same tick rather than waiting for the next.
     self.flush_closing(now, stream);
 
-    // 7d''. Re-run the listener/dial rebalance over every slot the machine tick and
-    // teardown just freed back to the pool IN THIS TICK. The early 1c rebalance ran
-    // before step 6 and saw only what the 1a reap had freed; the slot-freeing
-    // teardown paths run LATER (after the machine tick fires the `Close`/`Abort`
-    // actions), so a slot freed here would otherwise sit idle until the next pump —
-    // stranding a deferred `PendingDial` or a missing listener until some unrelated
-    // timer happened to wake the driver, possibly past the waiting exchange's own
-    // bridge deadline (which would then kill it before it ever got the slot).
-    // Servicing the frees in-tick lets a freed slot immediately back the oldest
-    // waiting dial — its SYN egress is then driven by the stack deadline, which the
-    // driver reports as ~now — or restore the listener, so the returned wakeup is
-    // naturally correct with no `pending_dial` deadline term needed.
+    // 7d''. The pump's SOLE dial site: run the listener/dial rebalance over the
+    // whole pool — the spare slots 1a freed plus every slot the machine tick and
+    // teardown just freed back IN THIS TICK — and hand them to parked dials
+    // oldest-first, listener-first.
+    //
+    // Every dial the engine issues happens here, after step 6, and that placement is
+    // the expiry check. The machine owns each exchange's deadline and judges it
+    // against this pump's own `now`: step 6's `handle_timeout` marks every bridge
+    // dirty, `pump_bridges` fails AND reaps an elapsed one in the same pass, and 7a
+    // drains the resulting `Abort` — which for a parked dial is a pure removal (no
+    // socket to reset). So an exchange that survives to this call has `deadline >
+    // now` by the machine's own judgment, and the engine compares no instant of its
+    // own: it can neither fail a dial early nor start one late. Slots freed by that
+    // very teardown are handed straight to the next viable waiting dial rather than
+    // sitting idle until the next pump — its SYN egress is then driven by the stack
+    // deadline, which the driver reports as ~now — or restore the listener, so the
+    // returned wakeup is naturally correct with no `pending_dial` deadline term
+    // needed.
     //
     // A slot returns to the pool ONLY through a reap (`retire` runs an immediate
     // reap, and 1a runs the periodic one): a teardown whose completion the driver
     // acknowledges this tick — a synchronous driver's clean/aborted socket — is
     // freed by that immediate reap and serviced here; one still tearing down waits
-    // in `retiring` and is freed by a LATER tick's 1a reap, whose freed slots the
-    // next tick's 1c rebalance claims. Either way this late rebalance dominates
-    // every in-tick free; if a new late free path is ever added, it must precede
-    // this call or the end-of-tick invariant below regresses.
+    // in `retiring` and is freed by a LATER tick's 1a reap and serviced by that
+    // tick's own call to this site. Either way this late rebalance dominates every
+    // in-tick free; if a new late free path is ever added, it must precede this call
+    // or the end-of-tick invariant below regresses.
     self.rebalance_pool(now, stream);
+
+    // 7d'''. Enforce the parked-dial ceiling over what the dial site left behind.
+    //
+    // Placed AFTER the rebalance because the rebalance is what decides which parked
+    // entries the pool can actually back. Ahead of it, a trim can only credit the
+    // free slots to the non-seed backlog and assume they will be spent there; every
+    // slot that instead goes to an older seed head (the rebalance serves the oldest
+    // parked exchange, seed or not) or to a missing listener (`ensure_listener` runs
+    // first inside it) leaves the pump one entry over the ceiling with nothing free
+    // behind it. Here the answer is already settled: by the end-of-tick invariant
+    // below a free slot and a parked dial cannot coexist, so every entry still
+    // parked is one the pool could not back and the ceiling bounds exactly those —
+    // a HARD post-pump bound rather than a bound on the excess.
+    //
+    // Still after the action drain, which is what makes the count exact: the machine
+    // surfaces every `Connect` before any teardown of the same tick, so a bound
+    // applied mid-drain would measure a fresh protocol-paced dial against entries
+    // the same loop is about to remove. And nothing trimmed here ever reached the
+    // wire — the rebalance moved everything it dialed out of `PendingDial`, which is
+    // the only state the trim can see.
+    self.trim_pending_dials(now);
 
     // Invariant held at end-of-tick: if the reliable pool is non-empty then a
     // listener is present AND no connection remains in `PendingDial`. The late
-    // rebalance above is the last pool-touching reliable phase — the gossip egress
-    // touches only the gossip socket, never the reliable pool — so the invariant
-    // cannot be disturbed before the deadline is computed below. Every pooled slot
+    // rebalance above is the last pool-touching reliable phase — the trim between
+    // them removes parked entries, which hold no slot, and the gossip egress touches
+    // only the gossip socket — so the invariant cannot be disturbed before the
+    // deadline is computed below. Every pooled slot
     // is reusable by construction now (a slot still tearing down lives in
     // `retiring`, never the pool), so there is no readiness qualifier: a non-empty
     // pool is unconditionally a listener + deferred-dial the rebalance must have
@@ -2606,7 +3242,7 @@ where
     // 7e. Egress: drain outbound gossip transmits, encode, and send.
     self.drain_gossip_transmits(gossip);
 
-    // 8. Next deadline = min(machine, closing, gossip-read-capped).
+    // 8. Next deadline = min(machine, closing, gossip-read-capped, seeds-waiting).
     //
     // The returned instant is the wake contract: a caller that sleeps until it
     // (combined with its own link-layer next-event deadline) must wake in time to
@@ -2635,6 +3271,24 @@ where
     //   unread. A truthful ring never sets it — not even an exactly-full one, whose
     //   probe pop finds nothing — and a node that has left never sets it (the term
     //   is gated on the running state).
+    // - the seed term — an already-due `now`, set only when join seeds are still
+    //   queued AND the pool is not empty: work the ENGINE itself deferred, whose
+    //   unblocking event is a slot this pump did not admit against (phase 5 measures
+    //   capacity before the in-tick frees of step 6 and 7). Without it a node that
+    //   queued more seeds than it could admit would sleep on an unrelated timer
+    //   before trying the next one.
+    //
+    //   It cannot spin. The end-of-tick invariant says a non-empty pool implies
+    //   nothing is parked — the seed head included, since it is a parked dial like
+    //   any other — so the next pump's spare capacity is the free pool itself minus
+    //   any out-of-pump sends since. Either that leaves room, in which case at least
+    //   one seed is admitted and the queue shrinks, or those sends take the slots at
+    //   7d'' and the pool empties, which clears the term. The head rule can only
+    //   shorten the queue further on such a pump: nothing is parked, so no seed is
+    //   parked either, and it admits one more. A seed the dial rejects synchronously
+    //   (CIDR-blocked, unroutable) frees its slot back the same tick without ever
+    //   connecting, which still shortens the queue by one per pump. A left node never
+    //   sets it: `leave` clears the queue and the term is gated on the running state.
     //
     // `pending_dial` deliberately contributes NO deadline of its own: a buffered
     // dial is serviced when a slot frees, never on a clock of its own, and every
@@ -2645,9 +3299,11 @@ where
     // tearing down is reaped to the pool only on a LATER tick by `reap_retiring`,
     // and the driver's own link-layer deadline (the smoltcp socket's pending-RST
     // dispatch, ~now) plus the folded `retiring` escalation deadline both guarantee
-    // that tick runs; the next tick's early rebalance then dials the waiting
-    // connection. Either way the unblocking event is already covered, so a
-    // `pending_dial` term would be redundant.
+    // that tick runs; that tick's own rebalance then dials the waiting connection.
+    // Either way the unblocking event is already covered, so a `pending_dial` term
+    // would be redundant — and the deadline a parked dial DOES own is already in the
+    // `machine` term above, since `StreamEndpoint::poll_timeout` folds every live
+    // bridge's own deadline, its still-handshaking ones included.
     //
     // The driver folds its own link-layer next-event deadline into the returned
     // instant before sleeping.
@@ -2670,7 +3326,37 @@ where
       )
       .min()
       .copied();
-    min_opt(min_opt(machine, closing), gossip_more.then_some(now))
+    // Seeds still waiting with a slot free to admit them against: ask for an
+    // immediate re-pump rather than sleeping on a timer (see step 8's seed term).
+    let seeds_waiting = running && !self.pending_seeds.is_empty() && !self.plane.pool.is_empty();
+    min_opt(
+      min_opt(machine, closing),
+      (gossip_more || seeds_waiting).then_some(now),
+    )
+  }
+
+  /// Hand one queued join seed to the machine as a `Join` push/pull, remembering
+  /// the `StreamId` so this tick's action drain can recognise the resulting
+  /// `Connect` as seed-originated.
+  ///
+  /// `start_push_pull` internally calls `service_dials` + `flush_outbound`, so the
+  /// `Connect` is queued for the drain at 7a of this same pump and the seed's first
+  /// dial bytes need no additional tick. The `StreamId` is not a driver-facing
+  /// token here — the dial itself is correlated by the `ExchangeId` the `Connect`
+  /// carries — it is purely the origin tag the drain matches on.
+  ///
+  /// The returned id can also be INERT: `start_push_pull` registers no intent and
+  /// queues no `Connect` when the framed request exceeds `max_stream_frame_size` (a
+  /// membership that outgrew one frame) or the endpoint is no longer running, and
+  /// says so only through a `DialAborted` on the application event queue, which the
+  /// engine must not consume. Recording the id regardless is what makes that case
+  /// legible: 7a matches and removes every id whose `Connect` surfaced, so whatever
+  /// is left when the drain ends is exactly this pump's refusals, counted into
+  /// [`join_seeds_refused`](Self::join_seeds_refused) there. The seed itself is
+  /// already off the queue either way; the caller's retry loop re-offers it.
+  fn admit_seed(&mut self, seed: SocketAddr, now: Instant) {
+    let sid = self.endpoint.start_push_pull(seed, PushPullKind::Join, now);
+    self.seed_stream_ids.push(sid);
   }
 
   /// Open a TCP dial for the `Dialing` connection `eid` on its assigned slot `c`.
@@ -2684,8 +3370,8 @@ where
   /// `Connection` is removed, and an EOF is latched on the bridge as a best-effort
   /// cancel. (For a `Handshaking` bridge that EOF is consumed only post-promotion,
   /// so the bridge is ultimately retired by its own dial/handshake deadline; the
-  /// driver has no prompt dial-cancel path.) Shared by the live `Connect` drain and
-  /// the deferred `drain_pending_dials` retry so both dial identically.
+  /// driver has no prompt dial-cancel path.) Reached only from
+  /// `drain_pending_dials`, the pump's single dial site.
   fn dial<S>(
     &mut self,
     eid: ExchangeId,
@@ -2750,22 +3436,30 @@ where
   ///
   /// Services the waiting connections oldest-first — by ascending `ExchangeId`,
   /// which is the machine's monotonically increasing per-endpoint correlation
-  /// token, so the oldest deferred dial is dialed first. Stops the moment the pool
-  /// empties again so the rest stay parked for a later tick. Called each `pump` LAST
-  /// in the accept/replenish/dial phase — after `reap_retiring`, `check_listener`,
-  /// and the `ensure_listener` self-heal — so the inbound listener has already taken
-  /// its slot and a deferred dial claims only what remains, yet a slot freed by a
-  /// timed-out dead-seed bridge is still promptly spent on the oldest waiting viable
-  /// dial rather than the intent being lost.
+  /// token, so the oldest deferred dial is dialed first and a dial requested this
+  /// very tick can never overtake one that has been waiting. Stops the moment the
+  /// pool empties again so the rest stay parked for a later tick. This is the ONLY
+  /// place the engine dials, and it runs once per `pump`, in the late rebalance
+  /// (7d'') — after `reap_retiring`, `check_listener`, the `ensure_listener`
+  /// self-heal and the machine tick — so the inbound listener has already taken its
+  /// slot, a deferred dial claims only what remains, and no dial is issued for an
+  /// exchange whose deadline the tick just judged elapsed.
   ///
-  /// A connection already retired (its bridge timed out and issued a `Close`) was
-  /// removed from `connections` by `teardown`, so this never dials a dead exchange.
-  /// Each assigned connection's parked `out` bytes and `fin_pending` FIN survive the
-  /// transition and flush/fire once the socket is Established.
+  /// A connection already retired (its bridge timed out and issued a `Close`/`Abort`)
+  /// was removed from `connections` by `teardown` / `abort_exchange`, so this never
+  /// dials a dead exchange. Each assigned connection's parked `out` bytes and
+  /// `fin_pending` FIN survive the transition and flush/fire once the socket is
+  /// Established.
   fn drain_pending_dials<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
   {
+    // Nothing to assign: skip the collect and the sort entirely. An exhausted pool is
+    // the common case on a busy node, and the work below is O(P log P) in the parked
+    // population — pure waste when there is not one slot to hand out.
+    if self.plane.pool.is_empty() {
+      return;
+    }
     // Collect the waiting dials oldest-first. The borrow of `connections` is
     // released before the dial loop mutates the plane.
     let mut waiting: MediumVec<(ExchangeId, SocketAddr)> = self
@@ -2810,12 +3504,12 @@ where
   /// Idempotent and LISTENER-FIRST — `ensure_listener` claims at most one slot
   /// before `drain_pending_dials` touches the pool, so an inbound listener is never
   /// starved by deferred outbound intent — and a no-op when the pool is empty or
-  /// there is no unmet demand. Run at two points each `pump`: early (1c), over the
-  /// slots `reap_retiring` freed plus the spare pool, BEFORE the machine tick so a
-  /// prior-tick `PendingDial` is dialed before its bridge can time out; and late
-  /// (7d''), over every slot the machine's teardown / close paths freed THIS tick, so
-  /// an in-tick free immediately backs a waiting dial or restores the listener
-  /// rather than sitting idle until the next pump.
+  /// there is no unmet demand. Run ONCE per `pump`, late (7d''), over the spare pool
+  /// plus every slot the machine's teardown / close paths freed THIS tick, so an
+  /// in-tick free immediately backs a waiting dial or restores the listener rather
+  /// than sitting idle until the next pump. Placing the pump's only dial site after
+  /// the machine tick is what keeps the machine the sole judge of exchange expiry;
+  /// the early phase (1c) calls `ensure_listener` alone.
   fn rebalance_pool<S>(&mut self, now: Instant, stream: &mut S)
   where
     S: StreamIo<Conn = C>,
@@ -2826,13 +3520,12 @@ where
 
   /// Drain all `StreamAction`s emitted by the machine this tick.
   ///
-  /// `Connect` — take a pooled slot, create a `Dialing` [`Connection`] (slot
-  /// assigned), and `dial` it. When the pool is exhausted a `PendingDial` connection
-  /// (no slot) is recorded instead and `drain_pending_dials` assigns a slot once one
-  /// frees, so the intent is never lost. If the connect call itself errors the slot
-  /// is returned to the pool, the connection is removed, and the bridge is retired by
-  /// its own dial/handshake deadline, since the driver has no prompt dial-cancel
-  /// path.
+  /// `Connect` — record a `PendingDial` [`Connection`] (no slot). This phase never
+  /// dials: the pump's single dial site is the late rebalance (7d''), which runs
+  /// after the machine tick has had its say on every exchange deadline, so a parked
+  /// dial the machine failed this tick is removed by its `Abort` before any slot can
+  /// be spent on it. `drain_pending_dials` then assigns slots oldest-first, so the
+  /// intent is never lost and never jumps the queue.
   ///
   /// `Shutdown` — the SEND-half close signal: the local side finished sending but
   /// the bridge is still awaiting the peer's reply and/or FIN. The graceful
@@ -2870,40 +3563,62 @@ where
           let peer = info.peer();
           // Record the originating StreamId so a driver awaiting this exchange can
           // correlate its terminal `ExchangeCompleted` by StreamId, not by arrival
-          // order. Recorded unconditionally (even when the pool is exhausted and the
-          // dial defers to `PendingDial`): the exchange exists and will complete.
+          // order. Recorded unconditionally — the exchange exists and will complete,
+          // whether its dial is issued later this tick or never issued at all.
           self.outbound_stream_ids.insert(eid, info.stream_id());
 
-          // Every pooled slot is reusable by construction (a slot still tearing down
-          // lives in `retiring`, not the pool); when the pool is exhausted the dial
-          // defers to `PendingDial` until a retire is acknowledged and a slot frees.
-          match self.plane.pool.take() {
-            Some(c) => {
-              // A slot is free: mint its occupancy generation, create the Dialing
-              // connection (slot assigned), and issue the connect this same tick.
-              let g = self.advance_slot_gen(c);
-              self
-                .plane
-                .connections
-                .insert(eid, Connection::dialing(peer, c));
-              self.dial(eid, peer, c, g, now, stream);
+          // Was this dial requested by the join-seed drain earlier this same pump?
+          // The `Connect` carries no origin, so phase 5 recorded the `StreamId` of
+          // every seed it admitted and this consumes the match. Seed origin rides
+          // the `Connection` from here on, and two policies read it: `join` dedups
+          // against join intent alone, and the parked-dial bound exempts seeds.
+          let from_seed = match self
+            .seed_stream_ids
+            .iter()
+            .position(|&s| s == info.stream_id())
+          {
+            Some(i) => {
+              // Order is irrelevant — this is a set of at most one pump's
+              // admissions — so the O(1) removal is the right one.
+              self.seed_stream_ids.swap_remove(i);
+              true
             }
-            None => {
-              // Pool exhausted (or every freed slot still resetting): no slot free to
-              // back this dial right now. The Connect action was consumed by
-              // poll_action and is never re-emitted, so dropping it would LOSE the
-              // dial intent. Record a PendingDial connection (no slot yet) instead;
-              // this same tick's request bytes and a same-tick Shutdown accumulate on
-              // it, and `drain_pending_dials` assigns a slot once `reap_retiring` frees
-              // one (e.g. when a dead seed's bridge times out). This is what lets a
-              // multi-seed `join()` reach a viable later seed even when earlier dead
-              // seeds momentarily hold every slot.
-              self
-                .plane
-                .connections
-                .insert(eid, Connection::pending_dial(peer));
-            }
-          }
+            None => false,
+          };
+
+          // PARK, never dial here. The Connect action was consumed by `poll_action`
+          // and is never re-emitted, so dropping it would LOSE the dial intent; a
+          // `PendingDial` connection (no slot yet) records it, accumulates this same
+          // tick's request bytes and a same-tick `Shutdown`, and is handed a slot by
+          // the late rebalance (7d'') — the pump's SINGLE dial site.
+          //
+          // Parking unconditionally is what makes the dial site follow the machine
+          // tick: an exchange whose deadline elapsed while parked is failed and
+          // reaped by step 6, and the resulting `Abort` (drained just below, in this
+          // very loop) removes the connection before 7d'' looks for work — so no slot
+          // is ever spent on a SYN for an exchange the machine has already given up
+          // on. Dialing inline here would put that judgment before the tick that
+          // makes it. Nothing is lost by deferring within the tick: no phase between
+          // here and 7d'' can advance a freshly issued dial (7b needs an established
+          // socket, which a same-tick `connect` never is; 7c writes only under
+          // `may_send`), and the SYN egresses on the same post-pump stack poll.
+          //
+          // FIFO is a consequence: 7d'' drains the whole parked set oldest-first by
+          // `ExchangeId`, so a Connect minted this tick can never overtake one that
+          // has been waiting since an earlier tick.
+          //
+          // Unconditional also with respect to the parked-dial ceiling: that is
+          // applied by `trim_pending_dials` after the dial site has spent every free
+          // slot, so it counts against a set from which this drain's own `Abort`s
+          // have already been removed and which the pool has already been given its
+          // chance to back. Refusing inline here would measure the fresh dial against
+          // entries that no longer exist by the end of the loop.
+          let conn = if from_seed {
+            Connection::pending_dial_from_seed(peer)
+          } else {
+            Connection::pending_dial(peer)
+          };
+          self.plane.connections.insert(eid, conn);
         }
 
         StreamAction::Shutdown(r) => {
@@ -2944,6 +3659,142 @@ where
           self.abort_exchange(r.id(), now, stream);
         }
       }
+    }
+
+    // Every out-of-pump `send_reliable` since the last drain had its `Connect`
+    // queued synchronously by `start_user_message`, so this full drain has just seen
+    // all of them: each is now either a parked connection or a refused exchange, and
+    // counted there. Carrying the tally further would double-count them against the
+    // admission bounds.
+    self.api_dials_since_pump = 0;
+    // The seed origin tags are spent for the same reason. Every seed phase 5
+    // admitted this pump surfaced its `Connect` in the loop above and was matched
+    // there; an admission whose `start_push_pull` started no exchange never produces
+    // one, so its id would otherwise linger and could be matched by an unrelated
+    // exchange once `StreamId`s wrap.
+    //
+    // That residue IS the refusal signal, and the only one the engine may read: the
+    // machine's own is a `DialAborted` on the application event queue, which the
+    // engine must not consume. Every id still here started nothing — no intent, no
+    // `Connect`, no parked connection — while its seed left the queue, so count it
+    // before clearing, and let the caller's re-offer re-queue the address.
+    self.join_seeds_refused += self.seed_stream_ids.len() as u64;
+    self.seed_stream_ids.clear();
+  }
+
+  /// Enforce the parked-dial ceiling ([`Options::max_pending_dials`]) over what the
+  /// pump's dial site left parked.
+  ///
+  /// The ceiling covers caller- and protocol-originated dials, and it is ABSOLUTE:
+  /// after this call at most `max_pending_dials` of them are parked, whatever the
+  /// pool did with its free slots. Run last among the reliable phases (after 7d''),
+  /// which is what lets it be absolute rather than a bound on the excess. The
+  /// rebalance has already spent every free slot — on the listener first, then on
+  /// parked exchanges oldest-first — so a free slot and a parked dial cannot coexist
+  /// by the time this runs (the pump's end-of-tick invariant). Every entry still
+  /// parked is therefore one the pool could not back, and counting free slots
+  /// against the ceiling would be counting zero. It also means no free slot is ever
+  /// left idle by the cap: a slot the rebalance could spend was spent, on the oldest
+  /// intent, before anything was shed.
+  ///
+  /// Run ahead of the rebalance instead, the ceiling is not a ceiling: the trim has
+  /// to credit each free slot to the non-seed backlog before knowing where the
+  /// rebalance will put it, and a slot that goes to an older seed head or to a
+  /// missing listener leaves the pump one entry over the cap with nothing free
+  /// behind it.
+  ///
+  /// Still AFTER the whole action drain, which is what makes the count exact. The
+  /// machine surfaces every `Connect` before any `Shutdown` / `Close` / `Abort` of
+  /// the same tick, so mid-drain the parked set still holds every entry this tick's
+  /// teardowns are about to remove — including the cap-saturating dials that step 6
+  /// just expired. A bound applied inline at the `Connect` arm would measure a fresh
+  /// protocol-paced dial (a periodic push/pull, a reliable-ping fallback) against
+  /// that stale population and shed liveness work while capacity was in fact being
+  /// freed by the very same drain. By this point those `Abort`s have run.
+  ///
+  /// Nothing shed here ever reached the wire: the rebalance moves everything it
+  /// dialed out of [`ConnState::PendingDial`], the only state this filter admits.
+  /// The `take` below therefore always finds as many victims as it asks for — the
+  /// count is taken over exactly the population the filter walks.
+  ///
+  /// The NEWEST parked dials go first (highest `ExchangeId`), so what survives is
+  /// the oldest intent — the mirror of the order 7d'' spends slots in.
+  ///
+  /// Seed-originated entries stand outside the ceiling entirely — neither shed by it
+  /// nor counted against it. The engine admitted each against measured pool
+  /// capacity, and the oldest is the head that holds a queued seed's place in the
+  /// dial FIFO; shedding it would hand that place straight back to the newer sends
+  /// it exists to be ahead of. Counting it is the mirror error: a join arriving
+  /// after a cap-saturating burst would push that burst past the ceiling, and the
+  /// head — the youngest intent in the plane — would evict sends admitted before it
+  /// existed, inverting the very order this trim keeps.
+  ///
+  /// Both seed rules therefore read exactly what the rebalance left them. The head
+  /// rule's "at most one parked seed" is a predicate over the seed-originated parked
+  /// entries, which this never removes, so a trim cannot let a second head in; and
+  /// step 8's seed wake is gated on the pool, which this never touches — a parked
+  /// dial holds no slot, so shedding one frees nothing and leaves the pool exactly as
+  /// the dial site left it.
+  ///
+  /// So the TOTAL parked population may stand above the ceiling by what the engine
+  /// itself admitted: the seeds phase 5 admitted against measured capacity whose
+  /// slots the older parked dials took first, plus at most one head past that
+  /// capacity. That surplus is bounded by the pool size plus one, never by the
+  /// caller.
+  ///
+  /// Refusal is `handle_dial_failed`, the machine's documented never-connected
+  /// path. For an exchange started through the coordinator's `start_*` wrappers
+  /// (a `send_reliable`), the exchange terminalizes `Failed` and its
+  /// `ExchangeCompleted` still resolves the caller's `StreamId`, because the
+  /// drain's correlation insert has already happened. A machine-scheduled
+  /// exchange — the periodic push/pull, the reliable-ping fallback — carries no
+  /// exchange kind and terminalizes on its `Abort` alone, emitting no
+  /// `ExchangeCompleted`. Either way the `Abort` reaches the next pump's drain
+  /// and finds the connection gone — a no-op, exactly like a synchronous 7d''
+  /// dial rejection.
+  ///
+  /// O(1) while the connection table itself is within the cap — the common case,
+  /// and the one the gate below reads. Above it, O(live connections) to count the
+  /// parked non-seed dials, plus, when that count is over the cap, O(P log P) to
+  /// rank the parked population and one coordinator tick per shed entry — each
+  /// `handle_dial_failed` runs the coordinator's bridge/handshake/dial servicing,
+  /// O(active bridges) — so shedding `over` entries costs `over × O(active bridges)`
+  /// on top of the ranking.
+  fn trim_pending_dials(&mut self, now: Instant) {
+    // The parked non-seed dials are a subset of the connection table, so a table
+    // within the ceiling is trivially within it. Check the length the map already
+    // tracks before walking it: every pump reaches this phase, and all but the
+    // backlogged ones would otherwise pay a full scan to learn there is nothing to
+    // shed.
+    if self.plane.connections.len() <= self.cfg.max_pending_dials {
+      return;
+    }
+
+    let over = self
+      .plane
+      .pending_non_seed_dial_count()
+      .saturating_sub(self.cfg.max_pending_dials);
+    if over == 0 {
+      return;
+    }
+
+    // Newest first. The borrow of `connections` is released before the loop below
+    // mutates the plane.
+    let mut victims: MediumVec<ExchangeId> = self
+      .plane
+      .connections
+      .iter()
+      .filter(|(_, c)| c.state == ConnState::PendingDial && !c.from_seed)
+      .map(|(&eid, _)| eid)
+      .collect();
+    victims.sort_unstable_by_key(|eid| core::cmp::Reverse(eid.get()));
+
+    for eid in victims.into_iter().take(over) {
+      // A parked dial holds no slot, so removing it reclaims nothing and leaks
+      // nothing; it drops the exchange's parked request bytes with it.
+      self.plane.connections.remove(&eid);
+      self.pending_dial_rejections += 1;
+      self.endpoint.handle_dial_failed(eid, now);
     }
   }
 

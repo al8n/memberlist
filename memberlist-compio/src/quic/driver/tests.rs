@@ -1425,3 +1425,50 @@ async fn reliable_over_cap_repeated_bounded_and_per_peer() {
     "a send to a peer with capacity is admitted and parks, not refused"
   );
 }
+
+/// A QUIC teardown that cannot prove its socket was released reports that,
+/// instead of a `Ok(())` the caller would read as "rebind now".
+///
+/// A QUIC node binds exactly one socket — the reliable plane rides the same UDP
+/// socket as gossip — so the single receive-completion proof decides the whole
+/// reply, and the error names the gossip socket alone. The fallback is
+/// unreachable against a healthy loopback socket, so it is forced through the
+/// seam; the happy path (and the rebind it licenses) is covered by the QUIC
+/// lifecycle suite.
+#[compio::test]
+async fn shutdown_reports_unproven_release_for_the_quic_gossip_socket() {
+  use crate::{
+    FirstAddrResolver, MaybeResolved, Memberlist, Options, QuicTransport, QuicTransportOptions,
+    SocketAddrResolver,
+    error::{MemberlistError, UnreleasedSocket},
+  };
+
+  let node: Memberlist<smol_str::SmolStr, SocketAddr> = Memberlist::new(
+    Options::<QuicTransport<smol_str::SmolStr, SocketAddr>>::new(
+      QuicTransportOptions::<smol_str::SmolStr, SocketAddr>::new()
+        .with_local_id(smol_str::SmolStr::new("quic-unproven-release"))
+        .with_advertise_addr(MaybeResolved::Resolved(addr(0)))
+        .with_quic_config(test_quic_options()),
+    ),
+    VoidDelegate::default(),
+    &SocketAddrResolver,
+    &FirstAddrResolver,
+  )
+  .await
+  .expect("construct quic memberlist");
+
+  // The driver task runs on the thread that spawned it, so the seam this test
+  // sets is the one its own driver reads.
+  crate::driver::shared::set_force_teardown_fallback(true);
+  let res = node.shutdown().await;
+  crate::driver::shared::set_force_teardown_fallback(false);
+
+  match res {
+    Err(MemberlistError::ShutdownReleaseUnproven(e)) => assert_eq!(
+      e.socket(),
+      UnreleasedSocket::Gossip,
+      "a QUIC node binds only the gossip socket",
+    ),
+    other => panic!("expected an unproven-release shutdown reply, got {other:?}"),
+  }
+}

@@ -1156,6 +1156,35 @@ impl<I, A> Memberlist<I, A> {
   /// subsequent write call observes either `CommandSend` (if the channel
   /// is now closed) or `ReplyClosed` (if the send raced ahead of the
   /// shutdown).
+  ///
+  /// # Release of the bound ports
+  ///
+  /// `Ok(())` means every port this node bound was OBSERVED released: the
+  /// socket's last pending operation was completed rather than abandoned to a
+  /// cancellation the backend may drop, and its awaited `close` then returned
+  /// `Ok`. Rebinding the same address the moment this future resolves therefore
+  /// succeeds.
+  ///
+  /// [`MemberlistError::ShutdownReleaseUnproven`] means the node is stopped all
+  /// the same — the driver loop has exited and every waiter has been resolved —
+  /// but one of its sockets could not be proven free, so it may stay bound
+  /// until the process exits and an immediate rebind on that address may fail.
+  /// The error names the socket. Reaching it takes a torn-down interface or a
+  /// starved submission queue; it is not a shutdown that can be retried, since
+  /// there is no longer a driver to ask.
+  ///
+  /// # Worst-case latency
+  ///
+  /// Releasing the ports is bounded, not instantaneous. Each completion
+  /// protocol spends at most two attempts of two one-second steps (plus, for
+  /// the gossip socket, one second to bind the throwaway socket the marker is
+  /// sent from), and each close is capped at five seconds. The socket-release
+  /// phase alone can therefore take up to about 19 seconds on a stream
+  /// transport (listener plus gossip socket) and about 10 seconds on QUIC,
+  /// which binds one socket. Those are pathological ceilings — every step has
+  /// to time out — and a healthy teardown completes in microseconds; the drain
+  /// of in-flight bridges and the graceful-leave flush that precede this phase
+  /// have their own bounds on top.
   #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
   pub async fn shutdown(self) -> Result<()> {
     // First-caller-wins: the racing clone that flips the flag to true

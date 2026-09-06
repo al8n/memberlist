@@ -57,8 +57,9 @@ use crate::{
   driver::{
     options::{RuntimeOptions, StreamTransportOptions, capped_timer},
     shared::{
-      ExchangeId, add_obs_payload, cidr_blocks, dispatch_event_delegate, join_reply,
-      observation_payload_bytes, yield_once,
+      ExchangeId, PendingRecv, add_obs_payload, cidr_blocks, close_and_prove_release,
+      complete_accept_before_close, complete_recv_before_close, dispatch_event_delegate,
+      join_reply, observation_payload_bytes, shutdown_release_reply, yield_once,
     },
   },
   error::{JoinFailed, MemberlistError, Result},
@@ -692,7 +693,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
 
   // Hoist the listener-accept future ACROSS loop iterations. On a
   // completion-based backend (io_uring) `accept()` is an in-flight SQE; if it
-  // were recreated each iteration like the other select arms, every wakeup on a
+  // were recreated each iteration, every wakeup on a
   // non-accept arm would DROP it, cancelling the accept — and a connection the
   // kernel already accepted into a fresh fd is then closed, surfacing to the
   // peer as a reset mid-handshake. Under concurrent inbound joins that loses a
@@ -701,6 +702,14 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // connection is silently discarded. A readiness-based backend (kqueue/epoll)
   // would not lose the connection either way, but this keeps both correct.
   let mut accept_fut = Box::pin(listener.accept().fuse());
+
+  // The loop's single in-flight gossip receive, hoisted for exactly the reason
+  // `accept_fut` is: on a completion-based backend a receive dropped mid-flight
+  // discards a datagram the kernel already delivered into its buffer AND leaves
+  // an operation pinning the socket's shared descriptor until its cancellation
+  // is reaped. `gossip_socket.close()` below awaits that descriptor's last
+  // reference. See [`PendingRecv`].
+  let mut recv = PendingRecv::new(&gossip_socket, recv_buf_len);
 
   loop {
     let mut dirty = false;
@@ -946,23 +955,28 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       // select polls `recv` first (so a buffered datagram wins) and
       // falls through immediately on `zero_now` if recv is pending.
       //
+      // The peek re-polls the loop's ALREADY-ARMED receive rather
+      // than issuing a second one: two concurrent receives on one
+      // socket would race the kernel's delivery between them and lose
+      // whichever datagram went to the operation that is then
+      // abandoned.
+      //
       // The peek timer must be a real sleep (not `future::ready(())`)
-      // so io_uring has time to complete a freshly-submitted recv
-      // SQE. On completion-based io_uring the recv is ALWAYS Pending
-      // on first poll — the SQE has to be submitted, then the
-      // runtime processes the completion. A zero-duration ready
-      // future would always win the select on io_uring, the recv
-      // would be dropped + cancelled, and a kernel-buffered Ack
-      // would be lost. The 1ms default is comfortably above
+      // so a completion-based backend has time to surface a delivered
+      // datagram — on io_uring the receive stays Pending until the
+      // runtime reaps its completion, so a zero-duration ready future
+      // would always win the select and a kernel-buffered Ack would go
+      // unseen this tick. The 1ms default is comfortably above
       // io_uring's completion latency for a buffered recv (~100µs)
       // while keeping the per-iteration cost negligible; see
       // [`crate::DEFAULT_PEEK_BUDGET`].
-      let peek_buf = vec![0u8; recv_buf_len];
-      let peek_recv = gossip_socket.recv_from(peek_buf).fuse();
+      let mut peek_resolved = false;
+      let peek_recv = recv.fut().as_mut().fuse();
       let peek_timer = compio::time::sleep(capped_timer(driver_opts.peek_budget())).fuse();
       pin_mut!(peek_recv, peek_timer);
       select_biased! {
         gossip = peek_recv => {
+          peek_resolved = true;
           let BufResult(res, buf) = gossip;
           // CIDR: drop a datagram from a blocked source before any decode.
           if let Ok((n, src)) = res
@@ -974,9 +988,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
           }
         }
         _ = peek_timer => {
-          // No buffered datagram surfaced within the peek budget;
-          // fall through to the deadline-firing protocol below.
+          // No buffered datagram surfaced within the peek budget; the receive
+          // stays armed and falls through to the deadline-firing protocol below.
         }
+      }
+      if peek_resolved {
+        recv.rearm();
       }
 
       // Apply the deadline-firing protocol: drain bridge completions
@@ -1079,14 +1096,13 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
       dirty = false;
     }
 
-    // Per-iteration fresh allocation: the recv future owns the buffer by
-    // value while pending and the buffer is returned via `BufResult`. On
-    // cancellation (any non-recv arm fires first) the in-flight syscall
-    // is dropped and the buffer is freed; the next iteration allocates
-    // fresh. Pool-recycling would require an unnameable-future slot for
-    // marginal alloc savings.
-    let recv_buf = vec![0u8; recv_buf_len];
-    let recv_fut = gossip_socket.recv_from(recv_buf).fuse();
+    // `recv_fut` re-polls the loop's single armed receive; when another arm
+    // wins, the `Fuse` wrapper is dropped but the operation underneath stays in
+    // flight, so nothing is abandoned and no datagram is lost. It owns its
+    // buffer until it resolves, and is re-armed after the select only on the
+    // iterations where it actually did.
+    let mut recv_resolved = false;
+    let recv_fut = recv.fut().as_mut().fuse();
     let cmd_fut = commands.recv_async().fuse();
     let ready_fut = bridge_ready_rx.recv_async().fuse();
     let timer_fut = compio::time::sleep_until(timeout_deadline.into_std()).fuse();
@@ -1132,6 +1148,7 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
     //                starve any of the above arms.
     select_biased! {
       gossip = recv_fut => {
+        recv_resolved = true;
         let BufResult(res, buf) = gossip;
         match res {
           // CIDR: drop a datagram from a blocked source before any decode
@@ -1145,8 +1162,8 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
           Err(_) => {
             // Best-effort logging point would go here; a transient recv
             // error (ICMP unreachable surfacing as a syscall error on
-            // Linux, EAGAIN, etc.) is non-fatal — the next iteration
-            // re-arms recv with a fresh buffer.
+            // Linux, EAGAIN, etc.) is non-fatal — the failed operation
+            // has resolved, so the re-arm below issues a fresh receive.
           }
         }
       }
@@ -1235,6 +1252,12 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
         // more bridge events (if a fresh bridge is spawned) or wake on
         // other arms.
       }
+    }
+
+    // Re-arm only on the iterations where the receive actually resolved. The
+    // select's borrows have ended here, so the pending future can be replaced.
+    if recv_resolved {
+      recv.rearm();
     }
 
     // Past-due deadline, deferred from the timer arm so it can `&mut`-drain the bridge
@@ -1457,34 +1480,46 @@ pub(crate) async fn stream_driver_loop<I, A, R, D, G>(
   // The bridges were frozen and drained to disconnect inside
   // `freeze_and_drain_bridges_to_disconnected` above, so `bridges` is already
   // empty here — no separate close signal is needed.
-  // Drop the persistent accept future before the listener: it holds an
-  // in-flight accept borrowing `listener`, so the listener cannot be moved while
-  // it is alive. Cancelling a pending accept during shutdown is correct — a
-  // connection arriving as the driver tears down has nothing to be served.
-  drop(accept_fut);
-  // Drop the TCP reliable listener FIRST so the bound port is released
-  // immediately. The listener does not have an explicit close API
-  // distinct from drop — the local going out of scope here closes the
-  // file descriptor.
+  // Release both bound ports before acking the shutdown caller, and on each
+  // socket resolve its pending operation BEFORE awaiting the close.
   //
-  // Windows caveat: unlike the gossip UDP socket below (which gets an awaited
-  // `close()` because IOCP handle close is asynchronous), the listener has no
-  // such API, so its close rides `drop`. If IOCP closes the listening handle
-  // asynchronously, a same-port TCP rebind issued the instant `shutdown().await`
-  // returns could in principle race `AddrInUse`. In practice the integration
-  // suite rebinds on ephemeral ports (and retries `AddrInUse`), so this has not
-  // surfaced; a fully synchronous fix needs a compio `TcpListener` async-close.
-  drop(listener);
-  // Ignoring Err: socket close on shutdown — the runtime tears down
-  // file descriptors anyway and the error is unactionable.
-  let _ = gossip_socket.close().await;
+  // A pending accept or receive that is merely dropped relies on one
+  // best-effort cancellation — an io_uring submission-queue entry that is
+  // discarded when the queue is full, a Windows `CancelIoEx` whose completion
+  // arrives later. The orphaned operation then keeps a reference to its
+  // socket's shared descriptor: a bare `drop` of the socket does not release
+  // the port at all, and an awaited `close` waits on that reference forever.
+  // Completing the operation instead — a self-addressed connect for the
+  // accept, a self-addressed datagram for the receive — needs no free queue
+  // slot, so the close that follows has nothing left to wait for.
+  //
+  // Each socket's release is PROVEN only when its operation completed and its
+  // bounded close then returned Ok. The two proofs decide the shutdown
+  // caller's reply below: a teardown that fell back to the drop-based path, or
+  // whose close ran out its bound, may still be holding the port, and saying
+  // `Ok(())` there would promise a rebind that fails.
 
-  // Now ack the shutdown caller — both bound ports have been released,
-  // so the caller's `shutdown.await` returns to a state where an
-  // immediate rebind on the same address succeeds.
+  // Listener first: complete its accept, then close it.
+  let accept_completed = complete_accept_before_close(accept_fut.as_mut(), &listener).await;
+  // The accept future borrows `listener`, so it must go before the close moves
+  // it. It has resolved (or never had an operation), so this cancels nothing.
+  drop(accept_fut);
+  let listener_released = close_and_prove_release(accept_completed, listener.close()).await;
+
+  // Then the gossip socket: complete its receive, then close it.
+  let recv_completed = complete_recv_before_close(recv).await;
+  let gossip_released = close_and_prove_release(recv_completed, gossip_socket.close()).await;
+
+  // Now ack the shutdown caller. `Ok(())` means both bound ports were observed
+  // released, so the caller's `shutdown.await` returns to a state where an
+  // immediate rebind on the same address succeeds; otherwise the node is still
+  // stopped but the caller is told which socket it must not rebind yet.
   if let Some(reply) = shutdown_reply {
     // Ignoring Err: caller dropped the reply receiver.
-    let _ = reply.send(Ok(()));
+    let _ = reply.send(shutdown_release_reply(
+      Some(listener_released),
+      gossip_released,
+    ));
   }
 }
 

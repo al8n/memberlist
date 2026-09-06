@@ -230,3 +230,469 @@ fn dispatch_handles_repeated_calls_on_shared_delegate() {
     assert_eq!(rec.log.borrow().len(), i + 1);
   }
 }
+
+/// compio's default proactor capacity, and so io_uring's submission ring size.
+///
+/// compio does not re-export `ProactorBuilder` through its facade, so a test
+/// cannot ask for a smaller ring without taking a direct dependency on
+/// `compio-driver`; the default is assumed instead. If it ever changes, the
+/// saturation below stops leaving the ring full — which is precisely what
+/// `drop_based_teardown_does_not_complete_with_a_full_ring` detects.
+const PROACTOR_CAPACITY: usize = 1024;
+
+/// Stage `count` receives without yielding, so every entry stays in the
+/// submission queue. The returned futures must be kept alive: dropping one
+/// issues the very cancellation this scenario starves.
+///
+/// An ordinary operation push DRAINS the ring and retries when it finds it
+/// full, landing in an emptied ring. The ring is therefore only full after
+/// exactly `PROACTOR_CAPACITY` entries have been staged in total — counting
+/// the operation under test — so callers pass `PROACTOR_CAPACITY` minus what
+/// they have already staged. Staging one too many empties the ring and the
+/// scenario silently tests nothing.
+///
+/// On a readiness-based backend there is no submission queue and this is
+/// simply a set of pending receives.
+async fn stage_pending_receives(
+  socket: &compio::net::UdpSocket,
+  count: usize,
+) -> Vec<super::RecvFut<'_>> {
+  let mut staged = Vec::with_capacity(count);
+  for _ in 0..count {
+    let mut fut: super::RecvFut<'_> = Box::pin(socket.recv_from(vec![0u8; 64]));
+    // Poll once to stage the operation without awaiting it.
+    let _ = futures_util::poll!(fut.as_mut());
+    staged.push(fut);
+  }
+  staged
+}
+
+/// A driver's last receive must be COMPLETED before the socket is closed, not
+/// cancelled.
+///
+/// io_uring's cancellation is a single best-effort submission-queue push that
+/// is silently discarded when the queue is full. A receive whose cancellation
+/// is lost stays in flight forever holding a reference to the socket's shared
+/// descriptor, and `close` waits on that last reference — so a drop-based
+/// teardown hangs under exactly the conditions staged here. Completing the
+/// receive with a self-addressed datagram needs no free queue slot, so the
+/// close that follows has nothing left to wait for.
+#[compio::test]
+async fn teardown_completes_last_receive_with_submission_queue_saturated() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let filler = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+  // Arm the receive the way the driver loop does, so its entry is staged
+  // before the queue fills.
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+
+  // The receive above already occupies one ring entry, so one short of a full
+  // capacity of fillers leaves the ring exactly full.
+  let staged = stage_pending_receives(&filler, PROACTOR_CAPACITY - 1).await;
+
+  assert!(
+    complete_recv_before_close(recv).await,
+    "the teardown marker did not complete the pending receive",
+  );
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_ok(),
+    "close did not finish after the receive was completed",
+  );
+
+  drop(staged);
+}
+
+/// A wildcard bind is not a valid destination, so the marker is aimed at the
+/// matching loopback address on the bound port.
+#[compio::test]
+async fn self_addressed_dest_substitutes_loopback_for_a_wildcard_bind() {
+  let v4 = compio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+  let dest = self_addressed_dest(&v4).expect("bound socket has a destination");
+  assert_eq!(
+    dest.ip(),
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+  );
+  assert_eq!(dest.port(), v4.local_addr().unwrap().port());
+  assert_ne!(dest.port(), 0);
+}
+
+/// A concrete bind keeps its own address as the marker destination.
+#[compio::test]
+async fn self_addressed_dest_keeps_a_concrete_bind() {
+  let s = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  assert_eq!(self_addressed_dest(&s), s.local_addr().ok());
+}
+
+/// The drop-based teardown is fine when the submission queue has room: the
+/// cancellation lands, the operation ends, and the close completes.
+///
+/// This is the control for the baseline below — together they show that the
+/// hang is caused by the full ring and not by the pending receive as such.
+#[compio::test]
+async fn drop_based_teardown_completes_when_the_ring_has_room() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+  drop(recv);
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_ok(),
+    "close did not finish even though the cancellation had room to be pushed",
+  );
+}
+
+/// Baseline proving that the staging above really does leave the ring full.
+///
+/// With the ring full, the cancellation issued by dropping the armed receive
+/// is discarded, the operation is stranded, and the close never completes.
+/// That is the exact condition
+/// `teardown_completes_last_receive_with_submission_queue_saturated` is there
+/// to survive; if this stops holding, the saturation arithmetic (or
+/// [`PROACTOR_CAPACITY`]) has drifted and that test is no longer covering
+/// anything.
+///
+/// Ignored by default, and compiled only on Linux, because it asserts an
+/// io_uring-specific hang: on kqueue, IOCP, and io_uring's own polling fallback
+/// the cancellation is not a queue entry and the close completes, so an
+/// always-on assertion would fail on every other backend. The Linux CI lane
+/// runs it explicitly:
+/// `cargo test -p memberlist-compio --lib driver::shared -- --ignored`
+#[cfg(target_os = "linux")]
+#[compio::test]
+#[ignore = "asserts an io_uring-only hang; the Linux CI lane runs it with --ignored"]
+async fn drop_based_teardown_does_not_complete_with_a_full_ring() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let filler = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+  let staged = stage_pending_receives(&filler, PROACTOR_CAPACITY - 1).await;
+
+  // The ring is full, so this cancellation is discarded.
+  drop(recv);
+
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_err(),
+    "close completed, so the cancellation was pushed. Either this runner is not \
+     actually on io_uring (a sandbox that blocks io_uring_setup, or a kernel \
+     missing an opcode, drops compio onto its polling driver), or the \
+     saturation arithmetic has drifted and the ring was never full — in which \
+     case teardown_completes_last_receive_with_submission_queue_saturated is \
+     no longer covering anything",
+  );
+
+  drop(staged);
+}
+
+/// A future that never resolves and reports itself as UNTERMINATED.
+///
+/// `futures_util::future::pending` is fused the other way — it declares itself
+/// terminated precisely because it will never produce a value — which the
+/// accept helper short-circuits on. Standing in for an accept whose completion
+/// has not arrived needs the opposite: an operation that is still live, so the
+/// helper actually runs its attempt loop.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+struct Unresolved;
+
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+impl core::future::Future for Unresolved {
+  type Output = ();
+
+  fn poll(
+    self: core::pin::Pin<&mut Self>,
+    _: &mut core::task::Context<'_>,
+  ) -> core::task::Poll<Self::Output> {
+    core::task::Poll::Pending
+  }
+}
+
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+impl futures_util::future::FusedFuture for Unresolved {
+  fn is_terminated(&self) -> bool {
+    false
+  }
+}
+
+/// The accept-completion protocol gives up, it does not hang, when the
+/// operation it is trying to complete never resolves.
+///
+/// The helper exists so a driver's shutdown cannot hang, so every await inside
+/// it is bounded and an elapsed step is treated exactly like a failed one. A
+/// pending-forever future stands in for the pathological case the bound is
+/// there for: an accept whose completion never arrives, on a listener that is
+/// otherwise perfectly dialable. Without the bound on the accept await the
+/// first attempt would park here forever; with it, the attempt budget is spent
+/// and the caller is handed back onto the drop-based path, whose close is
+/// bounded by [`TEARDOWN_CLOSE_TIMEOUT`].
+///
+/// The elapsed-connect branch is not asserted here: the destination is derived
+/// from the listener's own bound address, so a test cannot aim the helper at
+/// something undialable without a second interface.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+#[compio::test]
+async fn teardown_accept_gives_up_when_the_operation_never_resolves() {
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let never = Unresolved;
+  futures_util::pin_mut!(never);
+
+  let started = std::time::Instant::now();
+  let completed = complete_accept_before_close(never, &listener).await;
+  let elapsed = started.elapsed();
+
+  assert!(
+    !completed,
+    "the helper claimed the accept was completed, but it never resolved",
+  );
+  // Each attempt spends at most one step bound on the accept; the connects are
+  // loopback and immediate. Twice the nominal budget leaves room for a loaded
+  // machine while still failing outright if an await has become unbounded.
+  assert!(
+    elapsed < TEARDOWN_STEP_TIMEOUT * (TEARDOWN_MARKER_ATTEMPTS as u32) * 2,
+    "the helper took {elapsed:?}, so an await inside it is no longer bounded",
+  );
+}
+
+/// A listener whose accept has ALREADY resolved needs no completion protocol.
+///
+/// The stream driver reaches its teardown by either arm of a `select`, so on the
+/// arm that fired the accept the future is spent: it holds no operation, nothing
+/// keeps a reference to the listener's descriptor, and the close can go straight
+/// ahead. Short-circuiting is what keeps that ordinary path off the wire — without
+/// it every clean shutdown would open a self-connection it has no use for.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+#[compio::test]
+async fn teardown_accept_short_circuits_on_an_already_resolved_future() {
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let port = listener.local_addr().unwrap().port();
+
+  // `futures_util`'s pending future is fused as TERMINATED, which is exactly the
+  // shape a resolved accept presents to the helper.
+  let spent = futures_util::future::pending::<()>();
+  futures_util::pin_mut!(spent);
+
+  assert!(
+    complete_accept_before_close(spent, &listener).await,
+    "a spent accept holds no operation, so the listener is already closeable",
+  );
+  // The helper dialled nothing: the port is still the listener's own and no
+  // connection was accepted onto it.
+  assert_eq!(listener.local_addr().unwrap().port(), port);
+}
+
+/// An unbound address has no port to aim a completion at, so it yields no
+/// destination.
+///
+/// This is the sole gate on the `false` both helpers return before they attempt
+/// anything: with no destination there is no datagram to send and no address to
+/// dial, and the caller falls back to the bounded drop-based close. The predicate
+/// is asserted directly because a socket cannot be made to report port zero once
+/// the kernel has bound it.
+#[compio::test]
+async fn self_addressed_has_no_destination_for_an_unbound_address() {
+  assert!(self_addressed("127.0.0.1:0".parse().unwrap()).is_none());
+  assert!(self_addressed("[::]:0".parse().unwrap()).is_none());
+}
+
+/// A concrete IPv6 bind is returned UNCHANGED, keeping the `scope_id` and
+/// `flowinfo` a `SocketAddr::new` round trip would silently drop.
+///
+/// A link-local destination (`fe80::/10`) is only reachable through its scope:
+/// stripped of it, the marker send fails to route and the teardown falls back
+/// to the drop-based path on a node that had nothing wrong with it.
+#[test]
+fn self_addressed_keeps_the_ipv6_scope_and_flow() {
+  let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+    "fe80::1".parse().expect("link-local"),
+    7946,
+    7,
+    3,
+  ));
+  let dest = self_addressed(scoped).expect("a bound address has a destination");
+  assert_eq!(dest, scoped, "the destination must round-trip untouched");
+  match dest {
+    SocketAddr::V6(v6) => {
+      assert_eq!(v6.scope_id(), 3, "the scope id is what makes it routable");
+      assert_eq!(v6.flowinfo(), 7);
+    }
+    other => panic!("expected a v6 destination, got {other}"),
+  }
+}
+
+/// A wildcard IPv6 bind is not a destination, so `::1` is substituted on the
+/// bound port — the v6 mirror of the v4 substitution.
+#[test]
+fn self_addressed_substitutes_ipv6_loopback_for_a_wildcard_bind() {
+  let dest = self_addressed("[::]:7946".parse().expect("wildcard v6"))
+    .expect("a bound address has a destination");
+  assert_eq!(
+    dest.ip(),
+    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+  );
+  assert_eq!(dest.port(), 7946);
+}
+
+/// The throwaway marker socket binds the destination's own address on an
+/// ephemeral port, so it sits on the same interface (and, for IPv6, in the same
+/// scope) as the socket the marker has to reach.
+#[test]
+fn marker_source_matches_the_destination_interface_on_an_ephemeral_port() {
+  let v4 = marker_source("127.0.0.1:7946".parse().expect("v4 dest"));
+  assert_eq!(v4.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+  assert_eq!(v4.port(), 0, "the source socket needs no stable identity");
+
+  let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+    "fe80::1".parse().expect("link-local"),
+    7946,
+    7,
+    3,
+  ));
+  match marker_source(scoped) {
+    SocketAddr::V6(v6) => {
+      assert_eq!(v6.ip(), &"fe80::1".parse::<std::net::Ipv6Addr>().unwrap());
+      assert_eq!(v6.port(), 0);
+      assert_eq!(v6.scope_id(), 3, "the source must sit in the same scope");
+      assert_eq!(v6.flowinfo(), 7);
+    }
+    other => panic!("expected a v6 source, got {other}"),
+  }
+}
+
+/// Release is proven only by BOTH halves: a completed operation and a close
+/// that returned `Ok` within its bound.
+///
+/// The `completed = false` arm is the one that matters. An abandoned operation
+/// may still own the descriptor even though the close returned promptly — on a
+/// readiness-based backend it genuinely is gone, but nothing observable
+/// distinguishes that from a completion-based backend whose cancellation was
+/// discarded, so the conservative answer is the only sound one.
+#[compio::test]
+async fn release_is_proven_only_by_a_completed_operation_and_an_ok_close() {
+  assert!(close_and_prove_release(true, async { Ok(()) }).await);
+  assert!(!close_and_prove_release(false, async { Ok(()) }).await);
+  assert!(
+    !close_and_prove_release(true, async { Err(std::io::Error::other("close failed")) }).await
+  );
+}
+
+/// A close that never finishes is bounded, and an unfinished close proves
+/// nothing.
+///
+/// This is the arm that keeps a shutdown from hanging on a descriptor an
+/// abandoned operation still owns: the caller waits [`TEARDOWN_CLOSE_TIMEOUT`]
+/// and then reports the port unproven rather than parking forever.
+#[compio::test]
+async fn a_close_that_never_finishes_is_bounded_and_proves_nothing() {
+  let started = std::time::Instant::now();
+  let proven =
+    close_and_prove_release(true, futures_util::future::pending::<std::io::Result<()>>()).await;
+  let elapsed = started.elapsed();
+
+  assert!(!proven, "an unfinished close cannot prove the port is free");
+  assert!(
+    elapsed >= TEARDOWN_CLOSE_TIMEOUT,
+    "the close was not actually awaited for its full bound ({elapsed:?})",
+  );
+  assert!(
+    elapsed < TEARDOWN_CLOSE_TIMEOUT * 2,
+    "the close bound did not hold: waited {elapsed:?}",
+  );
+}
+
+/// The shutdown reply names exactly the socket(s) whose release was not proven,
+/// and is `Ok(())` only when every one of them was.
+#[test]
+fn shutdown_reply_names_the_sockets_whose_release_was_not_proven() {
+  use crate::error::{MemberlistError, UnreleasedSocket};
+
+  assert!(shutdown_release_reply(Some(true), true).is_ok());
+  // A QUIC driver binds no listener, so its gossip socket decides alone.
+  assert!(shutdown_release_reply(None, true).is_ok());
+
+  let cases = [
+    (Some(false), true, UnreleasedSocket::Listener),
+    (Some(true), false, UnreleasedSocket::Gossip),
+    (Some(false), false, UnreleasedSocket::Both),
+    (None, false, UnreleasedSocket::Gossip),
+  ];
+  for (listener, gossip, expected) in cases {
+    match shutdown_release_reply(listener, gossip) {
+      Err(MemberlistError::ShutdownReleaseUnproven(e)) => assert_eq!(
+        e.socket(),
+        expected,
+        "listener={listener:?} gossip={gossip} named the wrong socket",
+      ),
+      other => panic!("expected an unproven-release reply, got {other:?}"),
+    }
+  }
+}
+
+/// The forced-fallback seam short-circuits both completion protocols.
+///
+/// It is the only way a test can reach the drop-based path against a live
+/// driver, so the seam itself is asserted here: without this, the driver-level
+/// tests that depend on it could pass because the protocol succeeded for an
+/// unrelated reason.
+#[compio::test]
+async fn the_forced_fallback_seam_short_circuits_both_completion_protocols() {
+  let socket = compio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let mut recv = PendingRecv::new(&socket, 64);
+  let _ = futures_util::poll!(recv.fut().as_mut());
+
+  set_force_teardown_fallback(true);
+  let completed = complete_recv_before_close(recv).await;
+  set_force_teardown_fallback(false);
+  assert!(!completed, "the seam must report the fallback path");
+
+  // Nothing was staged against the socket beyond the armed receive, so the
+  // ordinary drop-based close still finishes and the test cannot hang.
+  assert!(
+    compio::time::timeout(TEARDOWN_CLOSE_TIMEOUT, socket.close())
+      .await
+      .is_ok()
+  );
+}
+
+/// The accept protocol's seam short-circuits even the already-terminated
+/// case, which otherwise returns `true` without touching the network.
+#[cfg(any(
+  feature = "tcp",
+  feature = "tls-rustls-ring",
+  feature = "tls-rustls-aws-lc-rs"
+))]
+#[compio::test]
+async fn the_forced_fallback_seam_short_circuits_a_spent_accept() {
+  let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let spent = futures_util::future::pending::<()>();
+  futures_util::pin_mut!(spent);
+
+  set_force_teardown_fallback(true);
+  let completed = complete_accept_before_close(spent, &listener).await;
+  set_force_teardown_fallback(false);
+  assert!(!completed, "the seam must report the fallback path");
+}

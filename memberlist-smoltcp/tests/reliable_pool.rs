@@ -758,11 +758,15 @@ fn delayed_reply_after_half_close_still_completes() {
 /// 1. `n` dials a dead off-link seed `d1` at the start. `d1` is off `n`'s /24, so
 ///    `n` emits no SYN and the dial sits in SynSent holding the lone dial socket
 ///    until its bridge elapses at `stream_timeout`; the pool is now empty.
-/// 2. Later (a deliberate stagger), `n` dials a second dead off-link seed `d2`.
-///    The pool is empty, so this dial is deferred as a `PendingDial` with a
-///    bridge deadline LATER than `d1`'s — so it is still waiting at the tick
-///    `d1`'s socket frees, rather than expiring in the same tick (every dial
-///    started in one tick shares one `now + stream_timeout` deadline).
+/// 2. Later (a deliberate stagger), `n` opens a reliable send to a second dead
+///    off-link address `d2`. The pool is empty, so this dial is deferred as a
+///    `PendingDial` with a bridge deadline LATER than `d1`'s — so it is still
+///    waiting at the tick `d1`'s socket frees, rather than expiring in the same
+///    tick (every dial started in one tick shares one `now + stream_timeout`
+///    deadline). A reliable send is used rather than a second join because join
+///    intent is admitted against real pool capacity: a seed the pool cannot back
+///    waits as a bare address, never as a parked dial, so it could not contend
+///    for the freed socket at all.
 /// 3. A real peer `p` dials `n` once, timed so its three-way handshake completes
 ///    right as `d1`'s socket frees — making `n`'s listener the contested
 ///    consumer of that one socket against the still-waiting `d2` `PendingDial`.
@@ -798,9 +802,10 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   // `d1`'s dead dial frees the lone dial socket at this deadline; the stagger and
   // `p`'s join are timed around it (see below).
   const STREAM_TIMEOUT_MS: u64 = 300;
-  // Tick at which `n` dials the second dead seed, so its `PendingDial` deadline
-  // (~`tick_d2 * 10ms + STREAM_TIMEOUT_MS`) outlives `d1`'s socket-free event.
-  const D2_JOIN_TICK: u32 = 20;
+  // Tick at which `n` dials the second dead address, so its `PendingDial`
+  // deadline (~`tick_d2 * 10ms + STREAM_TIMEOUT_MS`) outlives `d1`'s socket-free
+  // event.
+  const D2_DIAL_TICK: u32 = 20;
   // Tick at which `p` dials `n`, timed so the inbound handshake settles as `d1`'s
   // socket frees, putting the listener and the pending dial in contention for it.
   const P_JOIN_TICK: u32 = 27;
@@ -844,8 +849,9 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   );
   p.start(now);
 
-  // Two dead off-link seeds (off `n`'s 10.0.0.0/24 — `n` has no route, emits no
-  // SYN, so each dial simply sits until its bridge elapses at `stream_timeout`).
+  // Two dead off-link addresses (off `n`'s 10.0.0.0/24 — `n` has no route, emits
+  // no SYN, so each dial simply sits until its bridge elapses at
+  // `stream_timeout`).
   let d1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 9)), 7946);
   let d2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 10)), 7946);
 
@@ -865,9 +871,9 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   let mut first_accept_after_contention = 0u64;
   for i in 0..BUDGET {
     // Event 2: the staggered second dead dial becomes a waiting `PendingDial`.
-    if i == D2_JOIN_TICK {
-      n.join(&SocketAddrResolver, &[MaybeResolved::Resolved(d2)])
-        .expect("join from a running node");
+    if i == D2_DIAL_TICK {
+      n.send_reliable(d2, bytes::Bytes::from_static(b"contend"), clk.now())
+        .expect("reliable send from a running node");
     }
     // Event 3: `p`'s single inbound, timed to settle as `d1`'s socket frees.
     if i == P_JOIN_TICK {
@@ -885,7 +891,7 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
     // the listener), and the listener is re-established from `d1`'s freed socket
     // while `d2` is STILL deferred — the freed socket went to the listener, not the
     // dial. The `d1` socket's abort now retires through the ledger and is reclaimed
-    // only once its reset RST has egressed (#161), one poll after the bridge
+    // only once its reset RST has egressed, one poll after the bridge
     // elapses, so the accept and the reclaim need not fall in the SAME poll; wait
     // until BOTH the accept has happened AND the listener is present, then witness
     // that `d2` never stole the one free socket (it is still `PendingDial`). Under
@@ -912,16 +918,23 @@ fn listener_keeps_first_claim_on_freed_socket_over_pending_dial() {
   );
 
   // Corroboration: with the listener re-established, a fresh inbound is still
-  // accepted. `p` dials `n` a second time; `n`'s accept count must climb past the
-  // accept it had at the contended poll. On the buggy order the listener is gone
-  // for good here, so this never happens.
-  p.join(
-    &SocketAddrResolver,
-    &[MaybeResolved::Resolved(addr(1, 7946))],
-  )
-  .expect("join from a running node");
+  // accepted. `p` dials `n` again; `n`'s accept count must climb past the accept
+  // it had at the contended poll. On the buggy order the listener is gone for good
+  // here, so this never happens.
+  //
+  // The join is re-offered every poll rather than once, because a seed with a live
+  // reliable connection to it is not re-queued: `p`'s first exchange to `n` is
+  // still in flight at the contended poll, so a single call here would be absorbed
+  // as the duplicate it is. Re-offering is what a real caller's
+  // retry-until-joined loop does, and it takes effect the moment that exchange
+  // completes.
   let mut accepted_again = false;
   for _ in 0..BUDGET {
+    p.join(
+      &SocketAddrResolver,
+      &[MaybeResolved::Resolved(addr(1, 7946))],
+    )
+    .expect("join from a running node");
     let _ = n.poll(clk.now(), &mut dn);
     let _ = p.poll(clk.now(), &mut dp);
     if n.accepted_inbound_count() > first_accept_after_contention {
@@ -1206,34 +1219,37 @@ fn slow_but_progressing_close_is_hard_capped_by_close_timeout() {
   );
 }
 
-/// A second outbound exchange deferred to `PendingDial` behind the only free dial
-/// socket must be dialed the instant the FIRST exchange frees that socket — even
-/// when the freeing happens LATE in the same `poll` (in the teardown that runs
-/// after the machine tick) and the node is driven purely by the deadlines `poll`
-/// returns.
+/// A second outbound exchange deferred behind the only free dial socket must be
+/// dialed the instant the FIRST exchange frees that socket — even when the freeing
+/// happens LATE in the same `poll` (in the teardown that runs after the machine
+/// tick) and the node is driven purely by the deadlines `poll` returns.
 ///
-/// # The bug this guards
+/// # What this guards
 ///
-/// The accept/replenish/dial rebalance runs EARLY in `poll`, before the machine
-/// tick. But a socket is also returned to the pool LATE — by `teardown` (a clean
+/// A socket returns to the pool LATE in a poll — by `teardown` (a clean
 /// `Closed`/`TimeWait` exchange, or an abrupt abort) and by `flush_closing` (a
-/// drain-deadline abort) — all of which run AFTER the early rebalance. If the
-/// rebalance ran only early, a socket freed by the first exchange completing would
-/// sit idle until the NEXT poll, and the returned wakeup would carry no term for
-/// "a socket just freed and a dial is waiting". A caller that sleeps exactly to
-/// the returned deadline would then sleep until the waiting exchange's OWN bridge
-/// deadline — at which point the machine kills it before it ever got the socket.
-/// Re-running the rebalance after the late frees services the freed socket
-/// in-tick, so the deferred dial is issued immediately and its SYN egress is
-/// driven by the (near-now) stack deadline instead.
+/// drain-deadline abort), all of which run AFTER the machine tick. That socket must
+/// be re-offered within the SAME poll, by whichever of the two routes the waiting
+/// intent sits on: the post-tick rebalance — the pump's sole dial site — hands it to
+/// the oldest parked dial, or, for an intent still held in the seed queue because
+/// join admits seeds against real pool capacity rather than encoding a bridge it
+/// could not dial, the pump returns an already-due wake so the caller comes straight
+/// back and the next poll admits it. Without either route the freed socket would sit
+/// idle until some later poll while the returned wakeup carried no term for "a
+/// socket just freed and a dial is waiting", and a caller that sleeps exactly to
+/// that deadline would sleep on to the waiting exchange's OWN bridge kill — at which
+/// point the machine tears it down before it ever got the socket.
 ///
 /// # Construction
 ///
 /// The hub node `b` has `tcp_pool_size = 2`: one socket is its listener, leaving
 /// exactly ONE dial socket. It joins TWO reachable seeds `a1` and `a2` in a single
-/// `join`, producing two `Connect` actions the same tick: the first claims the
-/// lone dial socket (`Dialing`), the second finds the pool empty and is deferred
-/// to `PendingDial`. Both seeds are real nodes wired to `b` through a broadcast
+/// `join`, and the lone dial socket can back only one of them: the first is admitted
+/// against that free slot and dialed, the second is admitted as the seed queue's
+/// HEAD — the one admission the pump makes past measured capacity, so that the queue
+/// holds a place in the machine's dial order ahead of every later request — and its
+/// `Connect` therefore parks in `PendingDial` with no socket, which is the state the
+/// witness below reads. Both seeds are real nodes wired to `b` through a broadcast
 /// hub (each on the shared `/24`, reachable; the two seeds are NOT wired to each
 /// other). With every periodic scheduler disabled, `b` can learn a seed ONLY via
 /// its own direct push/pull to it — so reaching all three members proves BOTH
@@ -1331,9 +1347,14 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   )
   .expect("join from a running node");
 
-  // Witness that the second exchange was genuinely deferred at least once: the
-  // single dial socket cannot back both at the join tick.
-  let mut saw_pending_dial = false;
+  // Witness that the second exchange was genuinely deferred rather than running
+  // alongside the first: with one dial socket for two dials, `b` must pass through a
+  // poll holding an exchange in `PendingDial` — requested, but with no socket
+  // assigned. Read the parked count itself rather than a membership size: `b` passes
+  // through a two-member state whenever its two exchanges merely complete at
+  // different instants, which says nothing about whether either ever waited for a
+  // socket.
+  let mut saw_a_deferred_dial = false;
 
   // Drive all three nodes purely by the deadlines `poll` returns: advance the
   // clock to the soonest FUTURE instant any node asked to be woken at, never a
@@ -1348,7 +1369,7 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
     let n2 = a2.poll(clk.now(), &mut d2);
 
     if b.pending_dial_count() >= 1 {
-      saw_pending_dial = true;
+      saw_a_deferred_dial = true;
     }
 
     // `b` learns a seed only by completing its direct push/pull to it; all three
@@ -1388,18 +1409,16 @@ fn late_freed_socket_services_deferred_dial_under_returned_deadline() {
   }
 
   assert!(
-    saw_pending_dial,
-    "the second join exchange was never deferred to PendingDial — the single \
-     dial socket should not have backed both seeds at the join tick, so the \
-     contended-socket scenario was not exercised"
+    saw_a_deferred_dial,
+    "`b` never held an exchange in `PendingDial` — the lone dial socket was never \
+     contended, so the scenario under test did not occur"
   );
   assert!(
     converged,
-    "B learned only {} of 3 members: its second join exchange was stranded in \
-     PendingDial when the first exchange freed the lone dial socket LATE in the \
-     same poll (after the machine tick), and a deadline-driven caller then slept \
-     until that stranded exchange's bridge deadline killed it — the freed socket \
-     was never re-offered to the waiting dial in-tick",
+    "B learned only {} of 3 members: its second seed was stranded when the first \
+     exchange freed the lone dial socket LATE in the poll (after the machine \
+     tick), and a deadline-driven caller then slept past it — the freed socket \
+     was never re-offered to the waiting outbound intent in-tick",
     b.num_members(),
   );
 }

@@ -1088,6 +1088,9 @@ struct ProgRel {
   closed: Vec<u32>,
   /// Handles `abort()` was called on (RST).
   aborted: Vec<u32>,
+  /// Every `(handle, remote)` the engine issued a link-layer `connect` for, in
+  /// order — the record of which dials actually reached the wire.
+  connects: Vec<(u32, SocketAddr)>,
   /// When set, every `connect` is rejected with `Busy` — modelling a link layer
   /// that refuses the dial before any SYN, which the engine's `dial` reclaims
   /// and terminalizes as a failure.
@@ -1110,6 +1113,7 @@ impl ProgRel {
       sent: Vec::new(),
       closed: Vec::new(),
       aborted: Vec::new(),
+      connects: Vec::new(),
       connect_fails: false,
     }
   }
@@ -1167,6 +1171,7 @@ impl StreamIo for ProgRel {
     if self.connect_fails {
       return Err(crate::StreamIoError::Busy);
     }
+    self.connects.push((c, remote));
     // A dial opens the socket; the test flips `established` to model the
     // handshake completing on a later tick. Record the remote as the eventual
     // accepted peer for symmetry, though the dialer side never reads it.
@@ -1242,12 +1247,22 @@ impl StreamIo for ProgRel {
 /// terminal `Abort` within a couple of clock advances rather than the default
 /// many seconds.
 fn engine_with_stream_timeout(stream_timeout: Duration) -> (Engine<SmolStr, u32>, Instant) {
-  let now = Instant::from_origin(Duration::from_secs(86_400));
   let cfg = Options::new()
     .with_port(7946)
     .with_close_timeout(Duration::from_secs(10));
   let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
     .with_stream_timeout(stream_timeout);
+  engine_from(cfg, ep_cfg)
+}
+
+/// Build and start an engine from a fully-specified pair of options, for the
+/// admission tests that need to set a cap or a timer interval the shorthand
+/// builders above do not expose.
+fn engine_from(
+  cfg: Options,
+  ep_cfg: memberlist_proto::EndpointOptions<SmolStr, SocketAddr>,
+) -> (Engine<SmolStr, u32>, Instant) {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
   let mut engine: Engine<SmolStr, u32> = Engine::try_new_at(
     cfg,
     TransformOptions::default(),
@@ -1414,6 +1429,2084 @@ fn pending_dial_when_pool_exhausted_then_dialed_once_slot_frees() {
     0,
     "the freed slot was consumed by the deferred dial"
   );
+}
+
+/// A parked dial whose exchange deadline elapses WHILE it is parked is never
+/// dialed: the machine tick judges the expiry first and the exchange is already
+/// terminal by the time the pump reaches its single dial site, so the freed slot
+/// is never spent on a doomed SYN.
+///
+/// The engine compares no instant of its own here. The deadline belongs to the
+/// machine, and step 6's `handle_timeout` fails and reaps the bridge in one pass,
+/// so the parked connection is removed by the resulting `Abort` before the late
+/// rebalance looks for work. The slot stays in the pool for the next viable dial
+/// instead of being pinned through a connect-then-RST cycle.
+#[test]
+fn parked_dial_expired_while_parked_is_never_dialed() {
+  use memberlist_proto::event::{ExchangeKind, ExchangeStatus};
+
+  let stream_timeout = Duration::from_secs(5);
+  let (mut engine, now) = engine_with_stream_timeout(stream_timeout);
+  // A listener is present but the dial pool is empty, so the `Connect` parks.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let to = node_addr(7002);
+  engine
+    .send_reliable(to, bytes::Bytes::from_static(b"doomed"), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the dial must park, or there is no expiry-while-parked window to test"
+  );
+  while engine.poll_event().is_some() {}
+
+  // A slot frees, but only after the exchange deadline has already elapsed.
+  engine.plane_mut().pool.push(5);
+  let late = now + stream_timeout + Duration::from_secs(1);
+  engine.pump(late, &mut gossip, &mut stream);
+
+  assert!(
+    stream.connects.is_empty(),
+    "an exchange the machine has already failed must never reach connect, got {:?}",
+    stream.connects
+  );
+  assert!(
+    stream.aborted.is_empty(),
+    "no socket may be dialed and then RST for an expired exchange, got {:?}",
+    stream.aborted
+  );
+  assert!(
+    !StreamIo::is_open(&stream, 5),
+    "the freed slot must never have been opened"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "the expired exchange must be gone from the parked set"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    1,
+    "the freed slot stays available for the next viable dial"
+  );
+
+  let mut outcome = None;
+  while let Some(ev) = engine.poll_event() {
+    if let Event::ExchangeCompleted(ec) = ev {
+      if ec.kind() == ExchangeKind::UserMessage {
+        outcome = Some(ec.outcome());
+      }
+    }
+  }
+  assert_eq!(
+    outcome,
+    Some(ExchangeStatus::Failed),
+    "the expired exchange terminalizes through the machine's own failure path"
+  );
+}
+
+/// With no free slot there is nothing to assign, so the dial drain returns before
+/// collecting and sorting the parked set: the parked dials survive untouched and
+/// no `connect` is issued. This is the common shape on a saturated node, where the
+/// scan would otherwise be paid twice over for nothing.
+#[test]
+fn parked_dials_are_untouched_while_the_pool_is_empty() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Two sends with an empty pool: both park, oldest first by ExchangeId.
+  engine
+    .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"a"), now)
+    .expect("send_reliable queues the exchange");
+  engine
+    .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"b"), now)
+    .expect("send_reliable queues the exchange");
+
+  let mut gossip = NoGossip;
+  for _ in 0..3 {
+    engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.pending_dial_count(),
+      2,
+      "an empty pool must leave every parked dial exactly where it is"
+    );
+    assert!(
+      stream.connects.is_empty(),
+      "no slot is free, so no dial may reach connect, got {:?}",
+      stream.connects
+    );
+  }
+}
+
+/// Options with the engine defaults plus a caller-chosen tweak, for the
+/// admission tests.
+fn admission_cfg() -> Options {
+  Options::new()
+    .with_port(7946)
+    .with_close_timeout(Duration::from_secs(10))
+}
+
+/// The join seed queue holds each address at most once, and a seed already being
+/// exchanged with is not re-queued. Both are what stops the natural
+/// retry-until-joined loop from re-encoding the whole local membership on every
+/// call: one address means one push/pull exchange in flight, however many times
+/// it is offered.
+#[test]
+fn join_dedups_duplicate_seeds_within_and_across_calls() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let a = node_addr(7002);
+  engine.join(&[a, a, a]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "one address must queue once however many times it is offered"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    2,
+    "the two repeats must be counted as deduped, not queued"
+  );
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "one seed address must produce exactly one dial, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "one seed address must produce exactly one outbound exchange"
+  );
+  assert_eq!(
+    engine.join_seeds_refused(),
+    0,
+    "a seed the machine does start an exchange for is not a refusal"
+  );
+
+  // Offered again while the exchange it started is still live: still one exchange.
+  engine.join(&[a]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "a seed with a live reliable connection must not be re-queued"
+  );
+  assert_eq!(engine.join_seeds_deduped(), 3, "the re-offer is counted");
+
+  // Complete the handshake so the parked push/pull request reaches the wire, and
+  // confirm it went out once, on the one connection.
+  stream.sock_mut(1).established = true;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    !stream.sent.is_empty(),
+    "the admitted seed's push/pull request must reach the wire"
+  );
+  assert!(
+    stream.sent.iter().all(|(h, _)| *h == 1),
+    "every byte must belong to the single seed exchange, got {:?}",
+    stream.sent.iter().map(|(h, _)| *h).collect::<Vec<_>>()
+  );
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "no second dial may appear for the same seed"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "still exactly one outbound exchange"
+  );
+}
+
+/// Seeds offered past the queue ceiling are dropped and counted, and the call
+/// still succeeds: a seed list is best-effort discovery intent, so its tail not
+/// fitting must not fail the whole call.
+#[test]
+fn join_seeds_over_cap_are_dropped_and_counted() {
+  let cfg = admission_cfg().with_max_pending_seeds(2);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  engine
+    .join(&[node_addr(7002), node_addr(7003), node_addr(7004)])
+    .expect("an over-cap seed list is still accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "the queue must hold exactly the cap"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    1,
+    "the surplus seed must be counted as dropped"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "distinct addresses are not duplicates"
+  );
+}
+
+/// A caller re-offering a seed list longer than the queue cap must reach every
+/// entry in it, not only the prefix that fits.
+///
+/// The starving shape: the seed that takes the first turn fails its dial instantly,
+/// so by the next offer it is neither queued nor mid-exchange and is admissible all
+/// over again. Admitting the same first turn every time would refill the only queue
+/// slot with it and drop the reachable seed behind it, on every offer, forever.
+/// Resuming where the previous call ran out of room queues the seed that missed its
+/// turn instead, so the reachable one is dialed on the very next offer.
+///
+/// First here means first in ADDRESS order, not first in the caller's list, so the
+/// fixture puts `dead` below `live` in that order to be sure it is the fast-failing
+/// seed that takes the turn the rotation then has to move past.
+#[cfg(feature = "cidr")]
+#[test]
+fn re_offered_seeds_past_the_cap_are_admitted_round_robin() {
+  use memberlist_proto::CidrPolicy;
+
+  // The policy covers this node and `live`, but not `dead`: a blocked peer's dial is
+  // rejected before `connect`, which terminalizes the exchange and frees its slot in
+  // the same pump — the fast, total failure the rotation has to survive.
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Below `live` in address order, so the fast-failing seed is the one that takes
+  // the first turn and the rotation is what has to move past it.
+  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
+  let live = node_addr(7003);
+  let mut gossip = NoGossip;
+
+  // Two offers of the SAME list, exactly as a driver's retry loop makes them.
+  let mut offers = 0;
+  let mut failed_dead_exchanges = 0;
+  while offers < 2 && !stream.connects.iter().any(|(_, a)| *a == live) {
+    engine.join(&[dead, live]).expect("join is accepted");
+    engine.pump(now, &mut gossip, &mut stream);
+    while let Some(ev) = engine.poll_event() {
+      if let memberlist_proto::event::Event::ExchangeCompleted(ec) = ev {
+        if *ec.peer() == dead && !ec.outcome().is_succeeded() {
+          failed_dead_exchanges += 1;
+        }
+      }
+    }
+    offers += 1;
+  }
+
+  assert!(
+    stream.connects.iter().any(|(_, a)| *a == live),
+    "the reachable seed must be dialed within two offers of the list, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    offers, 2,
+    "the reachable seed must reach the wire on the second offer"
+  );
+  assert_eq!(
+    failed_dead_exchanges, 1,
+    "the fast-failing seed must be attempted once, not once per offer"
+  );
+  assert!(
+    !stream.connects.iter().any(|(_, a)| *a == dead),
+    "a blocked seed is rejected before connect, so it may never reach the wire"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    2,
+    "each offer sheds exactly one seed — the one the single slot had no room for"
+  );
+}
+
+/// The same seed SET offered in a DIFFERENT order each time must still reach every
+/// entry in it.
+///
+/// A cursor into the previous list rotates only while the caller's order holds
+/// still. Alternating `[dead, live]` with `[live, dead]` — what a re-resolution
+/// that reorders its candidates produces — puts the resumed index back on the
+/// failing seed every time, so the reachable one is never dialed at all. Ranking by
+/// ADDRESS instead makes the seed a call had no room for rank first on the next
+/// one, whatever position the caller then gives it. That bounds a two-address set
+/// at two offers: the first admits one of the pair, and if that was the failing
+/// seed the rotation now names the other.
+#[cfg(feature = "cidr")]
+#[test]
+fn reordered_re_offers_cannot_starve_a_reachable_seed() {
+  use memberlist_proto::CidrPolicy;
+
+  // The policy covers this node and `live`, but not `dead`: a blocked peer's dial
+  // is rejected before `connect`, which terminalizes the exchange and frees its
+  // slot in the same pump, so `dead` is admissible all over again by the next
+  // offer.
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Below `live` in address order, so the fast-failing seed is the one that takes
+  // the first turn and the rotation is what has to move past it.
+  let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
+  let live = node_addr(7003);
+  let mut gossip = NoGossip;
+
+  let mut offers = 0u64;
+  while offers < 20 && !stream.connects.iter().any(|(_, a)| *a == live) {
+    if offers.is_multiple_of(2) {
+      engine.join(&[dead, live]).expect("join is accepted");
+    } else {
+      engine.join(&[live, dead]).expect("join is accepted");
+    }
+    engine.pump(now, &mut gossip, &mut stream);
+    while engine.poll_event().is_some() {}
+    offers += 1;
+  }
+
+  assert!(
+    stream.connects.iter().any(|(_, a)| *a == live),
+    "the reachable seed must be dialed however the caller reorders the list, got {:?}",
+    stream.connects
+  );
+  assert!(
+    offers <= 2,
+    "a two-address set must reach its reachable entry within two offers, took {offers}"
+  );
+  assert!(
+    !stream.connects.iter().any(|(_, a)| *a == dead),
+    "a blocked seed is rejected before connect, so it may never reach the wire"
+  );
+}
+
+/// Where a positional cursor lands when two disjoint lists are offered alternately,
+/// modelling the admission the rank rotation replaced: one engine-wide index into
+/// whichever list an offer presents, resumed on the entry the previous offer had no
+/// room for.
+///
+/// The surrounding dynamics are the union test's own — one free queue slot, and
+/// every seed but `target` failing inside the pump that admitted it, so it is
+/// admissible all over again on the next offer. Returns the offer number that
+/// admits `target`, or `None` if `budget` offers pass without it.
+#[cfg(feature = "cidr")]
+fn positional_cursor_reaches(
+  lists: &[&[SocketAddr]],
+  target: SocketAddr,
+  budget: u64,
+) -> Option<u64> {
+  let mut cursor = 0usize;
+  for n in 0..budget {
+    let list = lists[(n as usize) % lists.len()];
+    // The single free slot goes to the first entry at or after the cursor.
+    let admitted = cursor % list.len();
+    if list[admitted] == target {
+      return Some(n + 1);
+    }
+    // The cursor resumes on the first entry this offer had no room for.
+    cursor = (admitted + 1) % list.len();
+  }
+  None
+}
+
+/// Two seed lists a caller would otherwise run separate join loops for must reach
+/// every reachable seed when they are offered TOGETHER as one list.
+///
+/// The rotation is engine-wide and a call advances it only past the entries that
+/// call saw, so the round-robin bound is over the addresses one offer names. Named
+/// together, `[dead1, live]` and `[dead2, dead3]` are four distinct addresses on one
+/// cycle against a single free slot, so the bound is `⌈4 ÷ 1⌉` offers: `live` is
+/// dialed within four wherever it sits in the address order, and each offer sheds
+/// the three the slot had no room for. The fixture puts `live` last in that order,
+/// so the sweep here is walked in full and the whole four-offer bound is exercised
+/// rather than a lucky prefix of it.
+///
+/// The negative control is the design the address cycle replaced. A positional
+/// cursor round-robins a single list perfectly well, but two disjoint lists offered
+/// alternately pin it: each list resumes at the index the other's offer left behind,
+/// so with one slot the cursor lands on a failing seed every single time and `live`
+/// is never admitted at all. That is the shape both halves of this contract remove —
+/// the address cycle so an offered set sweeps whatever order it arrives in, and the
+/// driver's union so the two lists arrive as one set.
+#[cfg(feature = "cidr")]
+#[test]
+fn the_union_of_two_lists_offered_together_reaches_every_reachable_seed() {
+  use memberlist_proto::CidrPolicy;
+
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Every `dead` is outside the policy, so its dial fails inside the pump that
+  // admitted it and frees the slot again before the next offer. All three sort
+  // below `live`, so `live` takes the last of the four turns and the sweep is
+  // walked end to end.
+  let dead1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
+  let dead2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 2)), 7004);
+  let dead3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 3)), 7005);
+  let live = node_addr(7003);
+  // The two lists as one offer, exactly as a driver that merges its live join loops
+  // hands them over.
+  let union = [dead1, live, dead2, dead3];
+  let mut gossip = NoGossip;
+
+  let mut offers = 0u64;
+  while offers < 20 && !stream.connects.iter().any(|(_, a)| *a == live) {
+    engine.join(&union).expect("join is accepted");
+    engine.pump(now, &mut gossip, &mut stream);
+    while engine.poll_event().is_some() {}
+    offers += 1;
+  }
+
+  assert!(
+    stream.connects.iter().any(|(_, a)| *a == live),
+    "the reachable seed must be dialed once both lists are offered together, got {:?}",
+    stream.connects
+  );
+  assert!(
+    offers <= 4,
+    "four distinct addresses against one free slot bound the sweep at four offers, took {offers}"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    3 * offers,
+    "every offer holds four candidates and the queue one slot, so each sheds exactly three"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "no address is offered twice while it is queued or mid-exchange"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "only the routable seed reaches the wire, got {:?}",
+    stream.connects
+  );
+
+  // The control is a working round-robin on ONE list — it reaches `live` on the
+  // second offer — so what pins it below is the alternation, not the model.
+  assert_eq!(
+    positional_cursor_reaches(&[&[dead1, live]], live, 20),
+    Some(2),
+    "a positional cursor sweeps a single list, so the model is not rigged to fail"
+  );
+  assert_eq!(
+    positional_cursor_reaches(&[&[dead1, live], &[dead2, dead3]], live, 20),
+    None,
+    "two disjoint lists offered alternately pin a positional cursor on a failing seed \
+     forever — the starvation the address cycle and the driver's union remove"
+  );
+}
+
+/// Run two offers of `pair` against a queue with exactly one free slot, returning
+/// the address admitted by each, in order.
+///
+/// The policy admits this node but neither seed, so every dial is rejected before
+/// `connect` and its exchange terminalizes inside the pump that made it — the slot
+/// is free again by the next offer and both entries are admissible every time. What
+/// picks between them is therefore the admission order alone.
+#[cfg(feature = "cidr")]
+fn admitted_over_two_offers(pair: [SocketAddr; 2]) -> [SocketAddr; 2] {
+  use memberlist_proto::CidrPolicy;
+
+  let cfg = admission_cfg()
+    .with_max_pending_seeds(1)
+    .with_cidr_policy(CidrPolicy::try_from(["10.0.0.0/8"].as_slice()).expect("valid cidr"));
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  let mut gossip = NoGossip;
+
+  let mut admitted = [pair[0]; 2];
+  for slot in admitted.iter_mut() {
+    engine.join(&pair).expect("join is accepted");
+    *slot = *engine
+      .pending_seeds
+      .front()
+      .expect("the free slot must take one of the pair");
+    engine.pump(now, &mut gossip, &mut stream);
+    while engine.poll_event().is_some() {}
+  }
+  admitted
+}
+
+/// Admission orders seeds by the ADDRESS, so two endpoints that differ in any field
+/// at all take turns instead of one holding the slot forever.
+///
+/// Ranking through a digest of the address cannot promise that: a digest has fewer
+/// bits than the addresses it summarizes, so two distinct endpoints can share one
+/// value, and a tie the selection resolves by offered position then hands the slot
+/// to the same entry on every offer — the other is never dialed at all, however long
+/// the caller retries. An IPv6 pair differing only in `flowinfo` or `scope_id` makes
+/// that collision structural rather than a matter of luck, because those fields
+/// address a destination but are not part of its IP or port.
+///
+/// The order over `SocketAddr` agrees with equality on every one of those fields, so
+/// distinct endpoints never tie, and the pair here alternates: the lower takes the
+/// first turn, the rotation moves to the higher, and the higher takes the second.
+#[cfg(feature = "cidr")]
+#[test]
+fn join_admission_is_a_total_order_over_addresses() {
+  // One IPv6 host and port, two scope ids: the same bytes on the wire, two
+  // different destinations.
+  let host = core::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 7);
+  let scoped_lo = SocketAddr::V6(core::net::SocketAddrV6::new(host, 7002, 0, 1));
+  let scoped_hi = SocketAddr::V6(core::net::SocketAddrV6::new(host, 7002, 0, 2));
+  assert!(
+    scoped_lo < scoped_hi,
+    "the scope id must separate two otherwise identical endpoints"
+  );
+  assert_eq!(
+    admitted_over_two_offers([scoped_lo, scoped_hi]),
+    [scoped_lo, scoped_hi],
+    "a pair differing only in scope id must take alternate turns, not one of them \
+     every turn"
+  );
+  // Offered the other way round the outcome must not move: the order is over the
+  // addresses, not over the caller's list.
+  assert_eq!(
+    admitted_over_two_offers([scoped_hi, scoped_lo]),
+    [scoped_lo, scoped_hi],
+    "the caller's order must not decide which of the pair goes first"
+  );
+
+  // The same contract one family down, where the port is the only distinguishing
+  // field.
+  let ported_lo = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7002);
+  let ported_hi = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 0, 0, 1)), 7003);
+  assert!(
+    ported_lo < ported_hi,
+    "the port must separate two endpoints on one host"
+  );
+  assert_eq!(
+    admitted_over_two_offers([ported_lo, ported_hi]),
+    [ported_lo, ported_hi],
+    "a pair differing only in port must take alternate turns"
+  );
+}
+
+/// A repeat of an address WITHIN one offer is a duplicate, not shed load: it takes
+/// no second slot, and it must be counted as deduped rather than as a seed the cap
+/// turned away. Only the distinct address that found no room is a drop.
+#[test]
+fn a_duplicate_within_one_offer_is_deduped_not_dropped() {
+  let cfg = admission_cfg().with_max_pending_seeds(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  // Both are on one host, so the ports order them: `a` takes the only slot, its
+  // repeat is the duplicate, and `b` is what the cap sheds.
+  let a = node_addr(7002);
+  let b = node_addr(7003);
+
+  engine.join(&[a, a, b]).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seeds.front(),
+    Some(&a),
+    "the lower-ranked address takes the only slot"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the repeat must not take a second slot"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    1,
+    "the repeat is a duplicate of an address this very call queued"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    1,
+    "only the distinct address the cap turned away is a drop"
+  );
+}
+
+/// A single offer far longer than the queue costs the engine a scratch of one entry
+/// per free slot plus one, and leaves both counters reconcilable against the length
+/// of the list the caller passed.
+///
+/// The bound is structural rather than timed, so there is no timing assertion here:
+/// what pins it is that the selection never holds more than that, which shows in the
+/// outcome — the queue keeps exactly the lowest-ranked entries, the rotation names
+/// the single entry just past them, and every other offered entry is counted once.
+/// Offering the list from the largest address down is the adversarial order for a
+/// bounded selection: every entry after the window fills displaces one already held,
+/// so the scratch is rewritten on every step and nothing is decided by arrival order.
+///
+/// The queue order is the second half of the contract. Ranking picks WHICH entries a
+/// full queue keeps; the caller's own order still decides the order they are dialed
+/// in, so the four survivors come back in the descending order they were offered in,
+/// not in the ascending order that selected them.
+#[test]
+fn selection_window_is_bounded_and_counts_stay_exact() {
+  let cfg = admission_cfg().with_max_pending_seeds(4);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  let addr = |i: u32| {
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+      7946,
+    )
+  };
+  let seeds: Vec<SocketAddr> = (0..1000u32).rev().map(addr).collect();
+  engine.join(&seeds).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    4,
+    "the queue must hold exactly the cap, however long the offer"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    996,
+    "every offered entry the cap turned away is counted exactly once"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "a thousand distinct addresses hold no duplicate"
+  );
+  assert_eq!(
+    engine.join_rotation,
+    Some(addr(4)),
+    "the rotation names the one entry just past the room the queue had"
+  );
+  assert_eq!(
+    engine.pending_seeds.iter().copied().collect::<Vec<_>>(),
+    std::vec![addr(3), addr(2), addr(1), addr(0)],
+    "the four lowest-ranked addresses must queue in the order the caller offered them"
+  );
+}
+
+/// The ranking window a long offer runs never holds more than `max_pending_seeds + 1`
+/// candidates, even when every entry ranks ahead of everything already held.
+///
+/// That window is the engine's own scratch, reserved at exactly that bound. An entry
+/// inserted BEFORE the worst one is popped holds one more than the bound for the
+/// length of the call, and nothing a caller can read would show it: the queue, the
+/// drop count and the rotation all come out identical either way. What it does do is
+/// grow the scratch past its reservation — the allocation the bound exists to avoid
+/// on a device whose whole heap may be a few kilobytes.
+///
+/// A descending offer is the adversarial order. With the rotation unset, rank rises
+/// with the address, so every entry after the first ranks ahead of every candidate
+/// held and takes the insert-into-a-full-window path rather than being shed outright.
+#[test]
+fn a_descending_offer_never_holds_more_than_the_window_bound() {
+  const CAP: usize = 7;
+  const OFFERED: u32 = 20;
+
+  let cfg = admission_cfg().with_max_pending_seeds(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  let addr = |i: u32| {
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+      7946,
+    )
+  };
+  let seeds: Vec<SocketAddr> = (0..OFFERED).rev().map(addr).collect();
+  let reserved = engine.join_window.capacity();
+  engine.join(&seeds).expect("join is accepted");
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    CAP,
+    "the queue must hold exactly the cap, however long the offer"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    u64::from(OFFERED) - CAP as u64,
+    "and every entry the cap turned away is counted exactly once"
+  );
+
+  assert_eq!(
+    engine.join_window_high_water,
+    CAP + 1,
+    "the window fills to the room the queue had plus the entry that names the next \
+     rotation, and never holds more than that at any point of the call"
+  );
+  assert_eq!(
+    engine.join_window.capacity(),
+    reserved,
+    "so the scratch reserved at construction still holds the ranking, unchanged"
+  );
+}
+
+/// At the SHIPPED default cap, an offer far longer than the queue ranks entirely
+/// inside the scratch construction reserved: the window fills to
+/// `max_pending_seeds + 1` and the buffer never grows.
+///
+/// This is the bound that matters on the tier this crate targets. A call-local
+/// buffer would have to hold 33 candidates here, so every such `join` would reach
+/// the heap — silently, since the queue, the drop count and the rotation all come out
+/// the same either way. Owning one buffer of exactly that capacity moves the single
+/// allocation to construction, where a driver can account for it.
+///
+/// A descending offer is the adversarial order (see the sibling test): every entry
+/// after the first ranks ahead of everything held, so each takes the
+/// insert-into-a-full-window path rather than being shed outright.
+#[test]
+fn a_default_cap_offer_ranks_inside_the_scratch_reserved_at_construction() {
+  const OFFERED: u32 = 40;
+
+  let cfg = admission_cfg();
+  let cap = cfg.max_pending_seeds;
+  assert_eq!(
+    cap,
+    crate::DEFAULT_MAX_PENDING_SEEDS,
+    "this pins the SHIPPED default, so it must be the default the crate ships"
+  );
+
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, _now) = engine_from(cfg, ep_cfg);
+
+  assert_eq!(
+    engine.join_window.capacity(),
+    cap + 1,
+    "construction reserves the whole bound: the cap's worth of room plus the entry \
+     that names the next rotation"
+  );
+  let reserved = engine.join_window.capacity();
+
+  let addr = |i: u32| {
+    SocketAddr::new(
+      IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+      7946,
+    )
+  };
+  let seeds: Vec<SocketAddr> = (0..OFFERED).rev().map(addr).collect();
+  engine.join(&seeds).expect("join is accepted");
+
+  assert_eq!(
+    engine.join_window_high_water,
+    cap + 1,
+    "the window fills to the full bound and never holds more at any point of the call"
+  );
+  assert_eq!(
+    engine.join_window.capacity(),
+    reserved,
+    "and having filled it, the ranking still did not grow the scratch — the join \
+     allocated nothing"
+  );
+
+  assert_eq!(
+    engine.pending_seed_count(),
+    cap,
+    "the queue holds exactly the cap"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    u64::from(OFFERED) - cap as u64,
+    "and every entry it had no room for is counted once — including the one the \
+     rotation now resumes from, which is why an over-long offer into an EMPTY queue \
+     already moves this counter"
+  );
+}
+
+/// A seed the machine refuses to start an exchange for is counted, and costs the
+/// queue its slot without producing a dial.
+///
+/// `start_push_pull` hands back an INERT `StreamId` — no intent registered, no
+/// `Connect` queued, a `DialAborted` on the application event queue its only trace —
+/// once the framed join request exceeds `max_stream_frame_size`, which is every seed
+/// a node whose membership outgrew one frame offers. Uncounted that is silent: the
+/// seed leaves the queue, nothing is dialed, and neither the drop nor the dedup
+/// counter moves, so a caller retrying until joined can only observe that it never
+/// joins. The engine may not read the machine's own signal — the `DialAborted` is
+/// the application's event — so it reads the absence of a `Connect` instead.
+#[test]
+fn a_seed_whose_join_frame_exceeds_the_cap_is_counted_and_starts_nothing() {
+  // Above the floor construction enforces (this node's own state at its worst-case
+  // meta) and far below what a few hundred members frame to.
+  const FRAME_CAP: usize = 1024;
+  const MEMBERS: u32 = 200;
+
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_max_stream_frame_size(FRAME_CAP);
+  let (mut engine, now) = engine_from(admission_cfg(), ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  let mut gossip = NoGossip;
+
+  // Grow the membership past what one frame can carry: the join request pushes the
+  // FULL local state, so from here every join frame is over the cap.
+  for i in 0..MEMBERS {
+    engine.inject_alive(
+      SmolStr::new(std::format!("peer-{i}")),
+      SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, i as u8)),
+        7946,
+      ),
+      now,
+    );
+  }
+  assert_eq!(
+    engine.num_members(),
+    MEMBERS as usize + 1,
+    "every injected peer must be a member, or the frame would not be over the cap"
+  );
+
+  let seed = node_addr(7002);
+  engine.join(&[seed]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the seed queues normally — `join` cannot know the frame will not fit"
+  );
+
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.join_seeds_refused(),
+    1,
+    "the pump admitted the seed, the machine started nothing for it, and that is \
+     what this counts"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "the seed is CONSUMED by the admission, refused or not"
+  );
+  assert!(
+    stream.connects.is_empty(),
+    "a refused seed opens no dial, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    0,
+    "and parks no connection, so it spends nothing the parked-dial ceiling measures"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    0,
+    "an inert id registers no outbound exchange to correlate a completion against"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    0,
+    "the queue had room, so this is not a shed seed"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "and no exchange to the address exists, so it is not a duplicate either"
+  );
+
+  // Nothing dedups a refused seed — there is no exchange in flight to dedup against
+  // — so the retry-until-joined loop re-queues it, and it is refused again. That is
+  // the loop an operator watching only this counter can recognise.
+  engine.join(&[seed]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the re-offer queues the address again"
+  );
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.join_seeds_refused(),
+    2,
+    "and the second admission is refused and counted exactly like the first"
+  );
+}
+
+/// An offer that finds NO free queue slot admits nothing, and costs the offered set
+/// no turn: the rotation stays on the entry that already ranked first, so the next
+/// offer with room admits exactly the address the full ones would have.
+///
+/// This is what makes the fairness bound a statement about capacity-bearing offers.
+/// Were a zero-room offer to advance the rotation PAST the entry it could not serve,
+/// a caller re-offering into a persistently full queue would walk the rotation over
+/// its whole set while admitting nothing, and the entry that came up each time would
+/// be skipped once room finally appeared — starvation driven by the retries meant to
+/// prevent it.
+///
+/// The queue is kept full by a PARKED seed head rather than by withholding the pump:
+/// with the pool empty the head the queue already gave up cannot be dialed, and while
+/// a seed head is parked the pump admits no further seed — so the pump runs between
+/// every offer here and the one queued address stays queued.
+#[test]
+fn offers_that_find_no_room_neither_count_nor_lose_progress() {
+  let cfg = admission_cfg().with_max_pending_seeds(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(30));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  let mut gossip = NoGossip;
+
+  // The pool is empty, so the first seed becomes the parked head: it holds the
+  // queue's place in the dial order and cannot make progress until a slot appears.
+  let parked = node_addr(7001);
+  engine.join(&[parked]).expect("join is accepted");
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the first seed must park for want of a slot"
+  );
+
+  // The one queue slot now holds an address that cannot leave it: no room, and no
+  // head rule to give it up while a seed head is already parked.
+  let held = node_addr(7002);
+  engine.join(&[held]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the cap is one, and that one slot is taken"
+  );
+
+  // Three offers of the same two addresses, each meeting a full queue.
+  let lower = node_addr(7003);
+  let higher = node_addr(7004);
+  assert!(lower < higher, "the ports must order the pair");
+  for offer in 1..=3u64 {
+    engine.join(&[lower, higher]).expect("join is accepted");
+    engine.pump(now, &mut gossip, &mut stream);
+    assert_eq!(
+      engine.pending_seed_count(),
+      1,
+      "offer {offer} met a full queue, so it admitted nothing"
+    );
+    assert_eq!(
+      engine.pending_seeds.front(),
+      Some(&held),
+      "and displaced nothing already queued"
+    );
+    assert_eq!(
+      engine.join_seeds_dropped(),
+      2 * offer,
+      "both its entries are shed and counted, offer {offer}"
+    );
+    assert_eq!(
+      engine.join_rotation,
+      Some(lower),
+      "and the rotation rests on the entry that ranks first, offer {offer}"
+    );
+  }
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "none of those entries was already queued or already being exchanged with"
+  );
+
+  // Free the head: a slot appears, the parked head is dialed, and the address behind
+  // it becomes the new head — so the queue empties and room returns.
+  engine.plane_mut().pool.push(1);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    !engine.plane_mut().has_parked_seed(),
+    "the freed slot must dial the parked head"
+  );
+  assert_eq!(
+    stream.connects,
+    std::vec![(1, parked)],
+    "and that dial is the head, got {:?}",
+    stream.connects
+  );
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    0,
+    "with nothing parked, the queued address is taken as the new head"
+  );
+
+  // The next offer of the same pair admits the address the full offers had ranked
+  // first — the three of them cost the set no turn.
+  engine.join(&[lower, higher]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seeds.front(),
+    Some(&lower),
+    "the entry the zero-room offers left the rotation on must be the one admitted"
+  );
+  assert_eq!(
+    engine.join_seeds_dropped(),
+    7,
+    "only the one entry this offer had no room for is a further drop"
+  );
+  assert_eq!(
+    engine.join_rotation,
+    Some(higher),
+    "and the rotation now moves on to the entry this offer could not serve"
+  );
+}
+
+/// Seeds are handed to the machine as the pool can back them, plus ONE head that
+/// holds the queue's place in the dial order. Everything past the head stays a bare
+/// address — no bridge, no full-state encoding, no deadline — so a long seed list
+/// costs one encoding per slot plus that single head, not one per seed. While the
+/// head is parked no further seed is admitted, so the exposure stays at one.
+#[test]
+fn join_admits_seeds_to_pool_capacity_plus_one_queue_head() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(30));
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  engine
+    .join(&[node_addr(7002), node_addr(7003), node_addr(7004)])
+    .expect("join is accepted");
+  assert_eq!(engine.pending_seed_count(), 3, "all three seeds queue");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the single free slot backs one seed, and one more is admitted as the head"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the head parks; the seed admitted against the free slot took it"
+  );
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the parked dial is the seed head"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    2,
+    "two exchanges — and so two full-state encodings — for three seeds"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    1,
+    "exactly one dial, got {:?}",
+    stream.connects
+  );
+
+  // A second slot appears: it goes to the parked head, and the seed still queued
+  // behind it is NOT admitted, because a seed is already holding a place.
+  engine.plane_mut().pool.push(6);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the last seed waits while a seed head is parked"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    2,
+    "the freed slot dials the head, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    2,
+    "and starts no further encoding"
+  );
+
+  // With the head dialed, nothing seed-originated is parked any more, so the next
+  // pump takes the last seed as the new head.
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_seed_count(), 0, "the queue drains");
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    3,
+    "one encoding per seed in total, spread across three pumps"
+  );
+}
+
+/// A seed left queued for want of capacity is work the ENGINE deferred, so the
+/// pump asks for an immediate re-pump the moment a slot is free to admit it
+/// against — but not while the pool is empty, when there is nothing to admit it
+/// against and some other deadline governs the wake.
+#[test]
+fn queued_seeds_with_a_free_slot_request_an_immediate_repump() {
+  let stream_timeout = Duration::from_secs(5);
+  let (mut engine, now) = engine_with_stream_timeout(stream_timeout);
+  engine.plane_mut().pool.push(5);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // The one free slot is spoken for by a reliable send before the seeds are queued.
+  // Two seeds, so one is left as a bare address behind the head — the queue entry
+  // this test is about.
+  engine
+    .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"first"), now)
+    .expect("send_reliable queues the exchange");
+  let head = node_addr(7003);
+  let waiting = node_addr(7004);
+  engine.join(&[head, waiting]).expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  let wake = engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the send claimed the only slot, so the queue gives up only its head"
+  );
+  assert_eq!(
+    stream.connects,
+    std::vec![(5, node_addr(7002))],
+    "only the send was dialed; the seed head parks behind it"
+  );
+  assert!(
+    wake.is_some_and(|w| w > now),
+    "with an empty pool there is nothing to admit against, so no immediate re-pump"
+  );
+
+  // Both exchange deadlines elapse: the send's slot is aborted and reaped back into
+  // the pool within this same tick, and the parked head — which owns a deadline of
+  // its own from the moment it was admitted — is reaped with it, leaving a free slot
+  // and the still-queued seed.
+  let later = now + stream_timeout + Duration::from_secs(1);
+  let wake = engine.pump(later, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pool_free_count(),
+    1,
+    "the failed send's slot is reaped back in-tick"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the seed behind the head is still queued"
+  );
+  assert_eq!(
+    wake,
+    Some(later),
+    "a queued seed with a free slot must ask for an immediate re-pump"
+  );
+
+  // That re-pump admits it against the reaped slot and dials it the same tick.
+  engine.pump(later, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_seed_count(), 0, "the seed is admitted");
+  assert!(
+    stream.connects.contains(&(5, waiting)),
+    "the reaped slot is spent on the queued seed, got {:?}",
+    stream.connects
+  );
+}
+
+/// `send_reliable` refuses once dials are already waiting the configured bound
+/// beyond what the pool could take, and says so at the call site as typed
+/// backpressure rather than parking yet another request.
+#[test]
+fn send_reliable_backpressure_bounds_parked_dials() {
+  let cfg = admission_cfg().with_max_pending_dials(3);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  // A listener but no dial slots, so every send parks.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  for i in 0..3u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let over = engine.send_reliable(node_addr(7010), bytes::Bytes::from_static(b"x"), now);
+  match over {
+    Err(memberlist_proto::Error::UserDialBacklogFull(full)) => {
+      assert_eq!(full.limit(), 3, "the carried limit is the configured bound");
+      assert_eq!(full.peer(), node_addr(7010), "and the refused destination");
+    }
+    other => panic!("expected UserDialBacklogFull, got {other:?}"),
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    3,
+    "exactly the admitted sends parked"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "the API pre-check spared the action drain any refusal"
+  );
+
+  assert!(
+    matches!(
+      engine.send_reliable(node_addr(7011), bytes::Bytes::from_static(b"x"), now),
+      Err(memberlist_proto::Error::UserDialBacklogFull(_))
+    ),
+    "the bound still holds once the parked set itself carries the backlog"
+  );
+}
+
+/// A left node answers `NotRunning`, not backpressure, however saturated its dial
+/// backlog is. The two refusals mean opposite things — pace and retry versus never
+/// again — so a lifecycle verdict must not arrive disguised as a retryable one.
+///
+/// The backlog is carried by the PARKED set here, which `leave` does not clear, so
+/// the pre-check still measures a saturated node on the send that follows: the only
+/// thing that can spare the caller the retryable answer is the lifecycle check
+/// running first.
+#[test]
+fn send_reliable_reports_the_lifecycle_before_the_dial_backlog() {
+  let cfg = admission_cfg().with_max_pending_dials(2);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  // A listener but no dial slots, so every send parks and the bound saturates.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  for i in 0..2u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    2,
+    "both sends park, so the backlog lives in the parked set"
+  );
+  assert!(
+    matches!(
+      engine.send_reliable(node_addr(7010), bytes::Bytes::from_static(b"x"), now),
+      Err(memberlist_proto::Error::UserDialBacklogFull(_))
+    ),
+    "the backlog is saturated while the node is still running"
+  );
+
+  // Leave, and do NOT pump: the parked dials the pre-check measures are untouched.
+  engine.leave(now).expect("leave from a running node");
+  assert_eq!(
+    engine.pending_dial_count(),
+    2,
+    "leave alone does not unwind the parked dials, so the backlog still reads full"
+  );
+
+  match engine.send_reliable(node_addr(7011), bytes::Bytes::from_static(b"x"), now) {
+    Err(memberlist_proto::Error::NotRunning) => {}
+    other => panic!("a left node must refuse a reliable send as NotRunning, got {other:?}"),
+  }
+}
+
+/// The bound applies to EVERY dial source, not just the application's. A
+/// protocol-paced dial requested while the caller has saturated the bound is
+/// failed through the machine's never-connected path — counted, and terminal —
+/// rather than left parked past the cap, and never reaches the wire. The trim runs
+/// within the same pump the dial was requested in, so it is never dialed.
+#[test]
+fn machine_originated_connect_over_cap_is_failed_not_parked() {
+  let cfg = admission_cfg().with_max_pending_dials(3);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60))
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // A peer for the periodic push/pull to target.
+  engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
+  for i in 0..3u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_dial_count(), 3, "the bound is saturated");
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "nothing has been refused yet"
+  );
+  while engine.poll_event().is_some() {}
+
+  // Advance past the push/pull interval so the machine requests its own dial.
+  let t = now + Duration::from_millis(150);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "the machine-paced dial must be refused, not parked"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    3,
+    "the parked set must not grow past the bound"
+  );
+
+  assert!(
+    stream.connects.is_empty(),
+    "a refused dial must never reach the wire, got {:?}",
+    stream.connects
+  );
+}
+
+/// A dial refused by the bound still carries its originating `StreamId` through
+/// to its terminal completion, and the correlation entry is pruned afterwards. A
+/// driver resolves a parked reliable-send waiter by that `StreamId`, so a refusal
+/// recorded before the correlation would leave the waiter hanging.
+///
+/// This is also the one shape in which an application send admitted at the call
+/// site is still refused after the action drain: the listener replenishing itself
+/// from the pool takes the free slot the pre-check measured against. The trim sheds
+/// the newest intent first, so it is the SECOND send — the one the pre-check
+/// admitted last — that is refused.
+#[test]
+fn over_cap_rejection_keeps_the_stream_id_correlation() {
+  let cfg = admission_cfg().with_max_pending_dials(1);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(5);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  // The listener's passive open has settled, so this pump consumes it and
+  // replenishes the listener from the pool — the free slot the sends measured
+  // against is gone by the time the actions drain.
+  stream.sock_mut(9).accepted = Some(node_addr(7900));
+  stream.sock_mut(9).established = true;
+
+  engine
+    .send_reliable(node_addr(7002), bytes::Bytes::from_static(b"first"), now)
+    .expect("the first send is admitted");
+  let refused_sid = engine
+    .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"second"), now)
+    .expect("the second send is admitted against the then-free slot");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    2,
+    "both sends were correlated as their Connects drained"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "the slot the listener took leaves the second send over the bound"
+  );
+  assert_eq!(engine.pending_dial_count(), 1, "only the first send parked");
+
+  let mut resolved = None;
+  while let Some(ev) = engine.poll_event() {
+    if matches!(ev, Event::ExchangeCompleted(_)) {
+      if let Some(sid) = engine.last_completed_send() {
+        resolved = Some(sid);
+      }
+    }
+  }
+  assert_eq!(
+    resolved,
+    Some(refused_sid),
+    "the refused send's completion must resolve the StreamId its caller holds"
+  );
+  assert_eq!(
+    engine.outbound_correlation_len(),
+    1,
+    "the refused exchange's correlation entry is pruned, leaving only the parked send"
+  );
+}
+
+/// A queued seed cannot be starved by a caller that keeps sending. The queue's head
+/// becomes a real exchange at the pump that first cannot back it with a slot, so it
+/// sits in the machine's dial order AHEAD of every send issued afterwards and takes
+/// the next freed slot before any of them. Seeds behind the head stay bare
+/// addresses, and exactly one seed-originated exchange is outstanding while they do.
+#[test]
+fn a_queued_seed_takes_a_freed_slot_before_later_sends() {
+  let cfg = admission_cfg();
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(1);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // The one dial slot is spoken for before the join, so no seed can be backed by it.
+  let occupier = node_addr(7002);
+  engine
+    .send_reliable(occupier, bytes::Bytes::from_static(b"occupier"), now)
+    .expect("send_reliable queues the exchange");
+
+  let seed = node_addr(7003);
+  engine
+    .join(&[seed, node_addr(7004), node_addr(7005)])
+    .expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    stream.connects,
+    std::vec![(1, occupier)],
+    "the older send takes the only slot"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the seed head parks; nothing else is outstanding"
+  );
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the parked dial is the seed head"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "the seeds behind the head stay bare addresses"
+  );
+
+  // A steady application send rate, one per pump, each newer than the parked head.
+  let later_sends = [node_addr(7010), node_addr(7011), node_addr(7012)];
+  for to in later_sends {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"later"), now)
+      .expect("the sends stay within the default bound");
+    engine.pump(now, &mut gossip, &mut stream);
+  }
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "no further seed is admitted while the head is still parked"
+  );
+  assert_eq!(
+    engine.plane_mut().pending_dial_count(),
+    4,
+    "the head plus the three later sends are all waiting"
+  );
+
+  // A slot frees. It must go to the seed, not to any send issued after it.
+  engine.plane_mut().pool.push(6);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    stream.connects,
+    std::vec![(1, occupier), (6, seed)],
+    "the freed slot must dial the seed ahead of every later send, got {:?}",
+    stream.connects
+  );
+  for to in later_sends {
+    assert!(
+      !stream.connects.iter().any(|(_, peer)| *peer == to),
+      "no send issued after the seed's admission may be dialed before it ({to})"
+    );
+  }
+}
+
+/// `join` dedups against JOIN INTENT, not against any connection that happens to
+/// share the address. An application send or a reliable ping to a seed is a
+/// different exchange with a different purpose: suppressing the seed against one
+/// discards the join outright while still returning `Ok`, leaving a caller waiting
+/// on its own timeout with no attempt outstanding at all.
+#[test]
+fn join_dedups_against_join_intent_not_any_connection_to_the_address() {
+  let (mut engine, now) = engine_with_stream_timeout(Duration::from_secs(60));
+  engine.plane_mut().pool.push(1);
+  engine.plane_mut().pool.push(2);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[1, 2, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // Two user messages, one per address, dialed on the pool's two slots.
+  let dialing_peer = node_addr(7002);
+  let half_closed_peer = node_addr(7003);
+  for to in [dialing_peer, half_closed_peer] {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"user"), now)
+      .expect("send_reliable queues the exchange");
+  }
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+
+  // One stays mid-handshake; the other is driven to the half-closed stage a reply
+  // is still awaited in. Neither is a join.
+  let half_closed_eid = *engine
+    .plane_mut()
+    .connections
+    .iter()
+    .find(|(_, c)| c.peer == half_closed_peer)
+    .expect("the second send's connection")
+    .0;
+  engine
+    .plane_mut()
+    .connections
+    .get_mut(&half_closed_eid)
+    .expect("the second send's connection")
+    .state = ConnState::HalfClosed;
+  assert_eq!(
+    engine
+      .plane_mut()
+      .connections
+      .values()
+      .find(|c| c.peer == dialing_peer)
+      .map(|c| c.state),
+    Some(ConnState::Dialing),
+    "the first send is mid-handshake"
+  );
+
+  engine
+    .join(&[dialing_peer, half_closed_peer])
+    .expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    2,
+    "neither a dialing nor a half-closed user message may suppress its seed"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    0,
+    "and neither may be counted as a duplicate join"
+  );
+
+  // A JOIN exchange to the same address IS a reason to skip: one push/pull per seed
+  // at a time is what keeps the retry loop from re-encoding the whole membership.
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the queue's head became a join exchange"
+  );
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the second seed waits behind the head"
+  );
+
+  engine.join(&[dialing_peer]).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    1,
+    "the seed with a live join exchange is not re-queued"
+  );
+  assert_eq!(
+    engine.join_seeds_deduped(),
+    1,
+    "and the skip is counted as the duplicate join it is"
+  );
+}
+
+/// The excess bound is evaluated over the parked set the drain LEAVES, not the one
+/// it starts from. The machine surfaces every `Connect` before any teardown of the
+/// same tick, so a tick that both reaps cap-saturating parked dials and emits a
+/// fresh protocol-paced dial would, measured inline, refuse the new dial against
+/// entries the same drain is about to remove — shedding liveness work while
+/// capacity was in fact being freed.
+#[test]
+fn a_fresh_connect_survives_a_tick_that_reaps_the_saturating_dials() {
+  let stream_timeout = Duration::from_millis(100);
+  let cfg = admission_cfg().with_max_pending_dials(3);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(stream_timeout)
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // A peer for the periodic push/pull to target.
+  engine.inject_alive(SmolStr::new("peer"), node_addr(7947), now);
+  for i in 0..3u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(engine.pending_dial_count(), 3, "the bound is saturated");
+  assert_eq!(engine.pending_dial_rejections(), 0, "nothing shed yet");
+  while engine.poll_event().is_some() {}
+
+  // One tick past BOTH the sends' exchange deadline and the push/pull interval: step
+  // 6 expires all three parked sends and mints the periodic push/pull, and the drain
+  // sees the fresh `Connect` before any of the three `Abort`s.
+  let t = now + stream_timeout + Duration::from_millis(50);
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "the fresh dial must not be shed against dials the same drain removed"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "the three expired sends are gone and the fresh dial is parked in their place"
+  );
+  assert!(
+    !engine.plane_mut().has_parked_seed(),
+    "the surviving parked dial is the machine's own, not a seed"
+  );
+}
+
+/// Over the cap, the trim sheds the NEWEST intent first, so what survives is the
+/// oldest application sends the bound still admits, plus the seed head holding the
+/// join queue's place. The head is outside the bound: it is neither shed nor able to
+/// push a send over. Every shed send still resolves the `StreamId` its caller holds.
+#[test]
+fn the_post_drain_trim_sheds_the_newest_non_seed_dials() {
+  let cfg = admission_cfg().with_max_pending_dials(2);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.plane_mut().pool.push(5);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[5, 6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+  // The listener's passive open has settled, so this pump consumes it and
+  // replenishes the listener from the pool: the free slot the sends were admitted
+  // against is gone by the time the actions drain, putting the parked set over the
+  // cap without any send having to be refused at the call site.
+  stream.sock_mut(9).accepted = Some(node_addr(7900));
+  stream.sock_mut(9).established = true;
+
+  let oldest = node_addr(7002);
+  engine
+    .send_reliable(oldest, bytes::Bytes::from_static(b"oldest"), now)
+    .expect("the first send is admitted");
+  let kept_middle = engine
+    .send_reliable(node_addr(7003), bytes::Bytes::from_static(b"middle"), now)
+    .expect("the second send is admitted");
+  let shed = engine
+    .send_reliable(node_addr(7004), bytes::Bytes::from_static(b"newest"), now)
+    .expect("the third send is admitted");
+
+  // Queued last, so the seed's exchange is the NEWEST of the four — and still
+  // outside the bound, neither shed by it nor counted against it.
+  engine.join(&[node_addr(7005)]).expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "one send stood beyond the bound over non-seed dials and was shed"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    3,
+    "the two oldest sends and the seed head remain parked"
+  );
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the seed head is outside the trim however new it is"
+  );
+
+  let mut resolved = Vec::new();
+  while let Some(ev) = engine.poll_event() {
+    if matches!(ev, Event::ExchangeCompleted(_)) {
+      if let Some(sid) = engine.last_completed_send() {
+        resolved.push(sid);
+      }
+    }
+  }
+  assert_eq!(
+    resolved,
+    std::vec![shed],
+    "the shed send's completion must resolve the StreamId its caller holds"
+  );
+  assert!(
+    !resolved.contains(&kept_middle),
+    "the trim takes the newest intent first, so the middle send must not be failed"
+  );
+
+  // A slot frees: it goes to the OLDEST survivor, proving the trim kept the right
+  // end of the queue. The seed's exchange is newer, so it waits one more turn.
+  engine.plane_mut().pool.push(6);
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    stream.connects.iter().any(|(_, peer)| *peer == oldest),
+    "the oldest surviving send is dialed, got {:?}",
+    stream.connects
+  );
+}
+
+/// The bound is over the caller's and the protocol's own parked dials, so a join
+/// that arrives AFTER a burst has saturated it cannot make the trim fire. The queue
+/// head is the engine's own admission and the youngest intent in the plane; counting
+/// it would have the trim shed the newest of the sends admitted before the join
+/// existed — the head evicting intent that preceded it, the exact inverse of the
+/// oldest-survives order the trim keeps.
+#[test]
+fn a_late_join_head_never_evicts_an_older_admitted_send() {
+  const CAP: usize = 2;
+  let cfg = admission_cfg().with_max_pending_dials(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  // A listener but no dial slots, so every send parks and the bound saturates at
+  // exactly CAP, with no free slot to widen it.
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  for i in 0..CAP as u16 {
+    engine
+      .send_reliable(node_addr(7002 + i), bytes::Bytes::from_static(b"x"), now)
+      .expect("sends up to the bound are admitted");
+  }
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert_eq!(
+    engine.pending_dial_count(),
+    CAP,
+    "every admitted send parked"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "the burst sits exactly at the bound, so nothing is shed"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The join arrives after the burst. Its head is admitted past measured capacity
+  // and parks as the NEWEST exchange in the plane.
+  engine.join(&[node_addr(7005)]).expect("join is accepted");
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the join's head must park, or there is nothing over capacity to test"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    0,
+    "a join must not shed a send that was admitted before it"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    CAP + 1,
+    "the head parks ON TOP of the saturated burst; no send may be evicted for it"
+  );
+  while let Some(ev) = engine.poll_event() {
+    assert!(
+      !matches!(ev, Event::ExchangeCompleted(_)),
+      "no admitted send may be terminalized by the arrival of a join"
+    );
+  }
+
+  // Counting the head with the sends is exactly what would fire the trim: measured
+  // over ALL parked entries the plane stands one past the bound, and the victim that
+  // excess would take is the newest send — admitted, and older than the head that
+  // displaced it. Measured over the non-seed entries alone it is not over at all.
+  assert_eq!(
+    engine
+      .pending_dial_count()
+      .saturating_sub(engine.pool_free_count())
+      .saturating_sub(CAP),
+    1,
+    "the all-entries excess is one; only the non-seed excess is zero"
+  );
+
+  // The caller's own budget is spent all the same: the bound over non-seed entries
+  // is saturated, so the next send is still refused at the call site.
+  assert!(
+    matches!(
+      engine.send_reliable(node_addr(7010), bytes::Bytes::from_static(b"x"), now),
+      Err(memberlist_proto::Error::UserDialBacklogFull(_))
+    ),
+    "the caller's bound is saturated whether or not a seed is parked"
+  );
+}
+
+/// The ceiling is a POST-PUMP bound, so it holds even when the free slot the pool
+/// had goes somewhere other than the backlog it would have been credited to. The
+/// dial site serves the OLDEST parked exchange first, seed or not; a ceiling applied
+/// ahead of it can only assume that slot will be spent on the non-seed backlog, and
+/// when an older seed head takes it instead the pump ends one entry over the cap
+/// with no free slot behind it.
+#[test]
+fn the_parked_dial_ceiling_holds_when_a_freed_slot_goes_to_an_older_seed() {
+  const CAP: usize = 2;
+  let cfg = admission_cfg().with_max_pending_dials(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(Duration::from_secs(60))
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  let mut stream = ProgRel::new(&[6, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  // A peer for the periodic push/pull to dial.
+  let peer = node_addr(7947);
+  engine.inject_alive(SmolStr::new("peer"), peer, now);
+
+  // The seed head parks with no slot to take, so it is the OLDEST parked exchange in
+  // the plane and the dial site reaches it ahead of every send below.
+  let seed = node_addr(7005);
+  engine.join(&[seed]).expect("join is accepted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    engine.plane_mut().has_parked_seed(),
+    "the seed head must park, or nothing in the plane is older than the sends"
+  );
+  assert_eq!(
+    engine.pending_dial_count(),
+    1,
+    "only the head is outstanding"
+  );
+  while engine.poll_event().is_some() {}
+
+  // CAP sends, minted after the head and dated at the pump's own instant so their
+  // exchange deadlines outlive it.
+  let t = now + Duration::from_millis(150);
+  let sends = [node_addr(7002), node_addr(7003)];
+  for to in sends {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"x"), t)
+      .expect("sends up to the ceiling are admitted");
+  }
+  // ONE slot, free when the dial site runs.
+  engine.plane_mut().pool.push(6);
+
+  // `t` is past the push/pull interval, so step 6 mints one fresh protocol dial in
+  // the same tick: CAP + 1 non-seed dials park behind a single free slot the older
+  // seed head is first in line for.
+  engine.pump(t, &mut gossip, &mut stream);
+
+  let parked_non_seed = engine.plane_mut().pending_non_seed_dial_count();
+  assert!(
+    parked_non_seed <= CAP,
+    "the ceiling is absolute: at most {CAP} caller- and protocol-originated dials may \
+     stay parked after a pump, got {parked_non_seed}"
+  );
+  assert!(
+    !engine.plane_mut().has_parked_seed(),
+    "the free slot went to the older seed head, so no seed is left parked"
+  );
+  assert!(
+    stream.connects.iter().any(|(_, p)| *p == seed),
+    "the head's dial is the one that reached the wire, got {:?}",
+    stream.connects
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "exactly the one entry the pool could not back is shed"
+  );
+
+  // The NEWEST non-seed intent is this tick's protocol dial, so that is the entry
+  // taken: its exchange is gone from the plane while both older sends stay parked.
+  let live: Vec<SocketAddr> = engine
+    .plane_mut()
+    .connections
+    .values()
+    .map(|c| c.peer)
+    .collect();
+  assert!(
+    !live.contains(&peer),
+    "the newest non-seed intent — this tick's protocol dial — is the one shed, \
+     but {peer} is still in {live:?}"
+  );
+  for to in sends {
+    assert!(
+      live.contains(&to),
+      "the older sends survive the trim, but {to} is gone from {live:?}"
+    );
+  }
+}
+
+/// The same ceiling holds when the free slot goes to the LISTENER. `ensure_listener`
+/// claims its slot inside the rebalance, ahead of every parked dial, so a ceiling
+/// applied earlier in the tick credits the backlog with a slot the listener is about
+/// to take — and the pump ends over the cap with the listener correctly re-armed.
+#[test]
+fn the_parked_dial_ceiling_holds_when_the_listener_takes_the_only_free_slot() {
+  const CAP: usize = 2;
+  let stream_timeout = Duration::from_millis(100);
+  let cfg = admission_cfg().with_max_pending_dials(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946))
+    .with_stream_timeout(stream_timeout)
+    .with_push_pull_interval(Duration::from_millis(100));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+  engine.set_listener(9);
+  engine.plane_mut().pool.push(5);
+  let mut stream = ProgRel::new(&[5, 9]);
+  stream
+    .listen(9, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let peer = node_addr(7947);
+  engine.inject_alive(SmolStr::new("peer"), peer, now);
+
+  // One dial takes the only pooled slot and never establishes: its exchange deadline
+  // is what frees that slot again, mid-tick, at the pump below.
+  let victim = node_addr(7001);
+  engine
+    .send_reliable(victim, bytes::Bytes::from_static(b"x"), now)
+    .expect("the first send is admitted");
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+  assert!(
+    stream.connects.iter().any(|(_, p)| *p == victim),
+    "the pooled slot was spent on the first send"
+  );
+  assert_eq!(
+    engine.pool_free_count(),
+    0,
+    "and nothing is left in the pool behind it"
+  );
+  while engine.poll_event().is_some() {}
+
+  // The listener's passive open settles, so the next pump hands its slot to the
+  // accepted exchange and finds nothing in the pool to replenish from: the node
+  // spends that tick with NO listener until a slot frees.
+  stream.sock_mut(9).accepted = Some(node_addr(7900));
+  stream.sock_mut(9).established = true;
+
+  let t = now + Duration::from_millis(150);
+  let sends = [node_addr(7002), node_addr(7003)];
+  for to in sends {
+    engine
+      .send_reliable(to, bytes::Bytes::from_static(b"x"), t)
+      .expect("sends up to the ceiling are admitted");
+  }
+  let dialed_before = stream.connects.len();
+
+  // All in one tick: the victim's exchange elapses and its `Abort` frees the only
+  // slot, step 6 mints a fresh protocol dial, and CAP + 1 non-seed dials stand parked
+  // when the rebalance hands that slot to the missing listener.
+  engine.pump(t, &mut gossip, &mut stream);
+
+  assert!(
+    engine.listener_present(),
+    "the freed slot re-armed the listener, which claims it ahead of every dial"
+  );
+  let parked_non_seed = engine.plane_mut().pending_non_seed_dial_count();
+  assert!(
+    parked_non_seed <= CAP,
+    "the ceiling is absolute: at most {CAP} caller- and protocol-originated dials may \
+     stay parked after a pump, got {parked_non_seed}"
+  );
+  assert_eq!(
+    engine.pending_dial_rejections(),
+    1,
+    "exactly the one entry the pool could not back is shed"
+  );
+  assert_eq!(
+    stream.connects.len(),
+    dialed_before,
+    "the slot went to the listener, so no parked dial reached the wire, got {:?}",
+    stream.connects
+  );
+}
+
+/// Both admission ceilings are rejected at zero, by the shared preflight and by
+/// construction alike: a zero seed queue could never join, and a zero parked-dial
+/// bound would refuse every dial a momentarily-empty pool could not take at once.
+#[test]
+fn zero_admission_caps_are_rejected_as_the_knobs_they_are() {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+
+  for (cfg, name) in [
+    (admission_cfg().with_max_pending_seeds(0), "seeds"),
+    (admission_cfg().with_max_pending_dials(0), "dials"),
+  ] {
+    let preflight = validate_runtime_config(&cfg, &TransformOptions::default(), 1400);
+    match (name, &preflight) {
+      ("seeds", Err(InitError::ZeroMaxPendingSeeds)) => {}
+      ("dials", Err(InitError::ZeroMaxPendingDials)) => {}
+      _ => panic!("{name}: preflight must name the zeroed knob, got {preflight:?}"),
+    }
+
+    let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+      cfg,
+      TransformOptions::default(),
+      memberlist_proto::EndpointOptions::new(SmolStr::new("z"), node_addr(7946)),
+      now,
+      test_rng(),
+      &NoGossip,
+    );
+    assert!(
+      rejected.is_err(),
+      "{name}: construction must reject the zeroed knob too"
+    );
+  }
 }
 
 /// A reliable exchange whose dial connects but whose handshake never completes is
@@ -3490,7 +5583,7 @@ fn a_never_activated_occupancy_round_trips_through_the_ledger() {
   );
 }
 
-// --- #159 F1/F2/F6: engine teardown / close-deadline / inbound-fault policy ---
+// --- Engine teardown, close-deadline and inbound-fault policy ---
 
 /// Drive an outbound reliable user-message to `Established` on slot 0 (listener on
 /// slot 1), returning the engine, the mock, the clock, and the exchange's
@@ -4562,16 +6655,16 @@ fn post_leave_gossip_is_popped_not_decoded_and_never_wakes() {
   );
 }
 
-/// The early rebalance dials a `PendingDial` parked on a previous pump, and a dial
-/// the transport rejects synchronously terminalizes through the machine — whose
-/// tick sweeps membership at this pump's instant. Running that before the gossip
-/// phase, as the pump did previously, let an unrelated outbound dial fire a
-/// suspicion this pump's ring already refutes. The rebalance therefore runs after
-/// both evidence feeds, while still preceding the machine tick that a parked dial
-/// needs it to precede.
+/// The rebalance dials a `PendingDial` parked on a previous pump, and a dial the
+/// transport rejects synchronously terminalizes through the machine — whose tick
+/// sweeps membership at this pump's instant. Running that before the gossip phase,
+/// as the pump once did, let an unrelated outbound dial fire a suspicion this
+/// pump's ring already refutes. The dial site therefore sits at the END of the
+/// tick (7d''), after both evidence feeds and after the machine tick, so a
+/// rejection can never precede the evidence that refutes it.
 #[cfg(feature = "cidr")]
 #[test]
-fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
+fn dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   use memberlist_proto::CidrPolicy;
 
   let cfg = Options::new()
@@ -4584,8 +6677,8 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   let mut stream = NoStream::with_pool(4);
   let (t1, s) = suspect_b(&mut engine, &mut gossip, &mut stream, f);
 
-  // A listener is installed and the pool is empty, so the dial below has to park
-  // as a `PendingDial` rather than taking a slot straight away.
+  // A listener is installed and the pool is empty, so the dial below has no slot
+  // to claim even at the late rebalance and is still parked when the next pump runs.
   engine.set_listener(1);
   let blocked = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 7001);
   engine
@@ -4597,7 +6690,7 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   assert_eq!(
     engine.pending_dial_count(),
     1,
-    "the dial must park with no slot, or the early rebalance has nothing to do"
+    "the dial must still be parked, or the rebalance under test has nothing to do"
   );
   while engine.poll_event().is_some() {}
 
@@ -4612,7 +6705,7 @@ fn early_rebalance_dial_rejection_cannot_sweep_before_this_pumps_gossip() {
   assert_eq!(
     engine.pending_dial_count(),
     0,
-    "the early rebalance must have dialed the parked exchange in this pump"
+    "the rebalance must have dialed the parked exchange in this pump"
   );
   assert_b_refuted(&mut engine);
   assert_eq!(gossip.ring_len(), 0, "the whole ring was read this pump");

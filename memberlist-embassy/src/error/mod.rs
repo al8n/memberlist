@@ -198,6 +198,37 @@ pub enum OpError {
   /// The machine rejected the operation because the node is not in a running
   /// state (e.g. it has already left the cluster).
   NotRunning,
+  /// The [`Runner`](crate::Runner) driving this node is gone: its `run` future was
+  /// dropped (a `select` that lost, a task teardown) or returned, so the pump that
+  /// is the only thing able to complete a parked operation will never run again.
+  ///
+  /// Terminal, and deliberately distinct from [`NotRunning`](Self::NotRunning):
+  /// that one says the NODE left the cluster, while this one says the node still
+  /// holds whatever state it had but has no driver left to advance it. Every
+  /// operation parked when the run future went away is failed with this, and every
+  /// later one is refused with it at the call site rather than parked on a wake
+  /// that can no longer arrive. Nothing on this handle can be retried into
+  /// success; build a fresh node to resume.
+  RunnerStopped,
+  /// The engine refused the operation for a reason that is neither the node's
+  /// lifecycle nor call-site backpressure. Carries the engine's own error.
+  ///
+  /// [`memberlist_proto::Error`] is `#[non_exhaustive]`, so a refusal this driver
+  /// does not translate is reported as itself rather than folded into one of the
+  /// answers a caller acts on: [`NotRunning`](Self::NotRunning) says retrying is
+  /// pointless and [`DialBacklogFull`](Self::DialBacklogFull) says pace and retry,
+  /// and neither is a safe guess for a refusal that means something else.
+  Rejected(memberlist_proto::Error),
+  /// The engine refused a [`send_reliable`](crate::Memberlist::send_reliable) at
+  /// the call site because reliable dials already wait
+  /// [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials) beyond
+  /// what the free reliable pool could take.
+  ///
+  /// Backpressure on THIS node's own application load — not a delivery failure and
+  /// not a lifecycle error: the payload was never dispatched and nothing is retried
+  /// for you, so pace the sends and try again once outstanding exchanges complete
+  /// and return their sockets.
+  DialBacklogFull,
   /// The address resolver failed while resolving a [`join`](crate::Memberlist::join)
   /// seed.
   ///
@@ -230,6 +261,26 @@ impl OpError {
     matches!(self, OpError::NotRunning)
   }
 
+  /// Whether the operation was refused because the run loop driving this node is
+  /// gone.
+  #[inline]
+  pub const fn is_runner_stopped(&self) -> bool {
+    matches!(self, OpError::RunnerStopped)
+  }
+
+  /// Whether the engine refused the operation for a reason other than the node's
+  /// lifecycle or call-site backpressure.
+  #[inline]
+  pub const fn is_rejected(&self) -> bool {
+    matches!(self, OpError::Rejected(_))
+  }
+
+  /// Whether a reliable send was refused because the dial backlog is full.
+  #[inline]
+  pub const fn is_dial_backlog_full(&self) -> bool {
+    matches!(self, OpError::DialBacklogFull)
+  }
+
   /// Whether the resolver failed on a join seed.
   #[inline]
   pub const fn is_resolve(&self) -> bool {
@@ -249,6 +300,15 @@ impl fmt::Display for OpError {
       OpError::PingTimeout => f.write_str("ping timed out: no ack within the probe timeout"),
       OpError::SendFailed => f.write_str("reliable send failed"),
       OpError::NotRunning => f.write_str("node is not in a running state"),
+      OpError::RunnerStopped => f.write_str(
+        "the run loop driving this node is gone: nothing parked on it can complete, and no \
+         further operation is accepted",
+      ),
+      OpError::Rejected(e) => write!(f, "the engine refused the operation: {e}"),
+      OpError::DialBacklogFull => f.write_str(
+        "reliable dial backlog is full: the send was refused as backpressure, not a failure — \
+         retry once outstanding exchanges complete",
+      ),
       OpError::Resolve(e) => write!(f, "seed address resolution failed: {e}"),
       OpError::NoAddresses => f.write_str("no wire address resolved for any seed"),
     }
@@ -261,6 +321,7 @@ impl std::error::Error for OpError {
   fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
     match self {
       OpError::Resolve(e) => Some(e.as_ref()),
+      OpError::Rejected(e) => Some(e),
       _ => None,
     }
   }

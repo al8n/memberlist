@@ -12,7 +12,6 @@ use core::{marker::PhantomData, net::SocketAddr, time::Duration};
 use alloc::{rc::Rc, vec::Vec};
 
 use embassy_net::{tcp::TcpSocket, udp::UdpSocket};
-use embassy_time::Timer;
 #[cfg(compression)]
 use memberlist_embedded::transform::CompressionOptions;
 use memberlist_embedded::{
@@ -113,14 +112,18 @@ fn checked_socket_timeout(
 ///
 /// The driver's `crate::Options` carries link-layer sizing (the bridge ring
 /// capacities, the per-socket timeout) that stays on the driver, while
-/// `memberlist_embedded::Options` carries only the port and close timeout (plus
-/// the CIDR policy) the engine reads directly. Built once, up front, so the same
-/// value drives both the construction preflight
+/// `memberlist_embedded::Options` carries the protocol policy the engine reads
+/// directly — the port, the close timeout, the per-pump gossip work ceiling, the
+/// two reliable-dial admission ceilings, and the CIDR policy. Built once, up
+/// front, so the same value drives both the construction preflight
 /// ([`memberlist_embedded::validate_runtime_config`]) and the engine itself.
 fn embedded_options(cfg: &Options) -> EngineConfig {
   let opts = EngineConfig::new()
     .with_port(cfg.port)
-    .with_close_timeout(cfg.close_timeout);
+    .with_close_timeout(cfg.close_timeout)
+    .with_gossip_read_cap(cfg.gossip_read_cap)
+    .with_max_pending_seeds(cfg.max_pending_seeds)
+    .with_max_pending_dials(cfg.max_pending_dials);
   // Forward the CIDR policy into the engine, which enforces it at the gossip
   // source (recv), the reliable accept, and membership admission.
   #[cfg(feature = "cidr")]
@@ -211,12 +214,14 @@ where
   /// - [`InitError::NoAddresses`] — the resolver returned no address for the
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
-  ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
-  ///   capacity reaches the engine's per-pump gossip read cap
-  ///   ([`memberlist_embedded::Options::gossip_read_cap`], defaulting to
-  ///   [`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
-  ///   or a machine-endpoint init failure).
+  ///   port / close-timeout, a zero
+  ///   [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) /
+  ///   [`max_pending_seeds`](crate::Options::max_pending_seeds) /
+  ///   [`max_pending_dials`](crate::Options::max_pending_dials), a non-routable or
+  ///   port-mismatched advertise address, an over-ceiling gossip MTU, a gossip UDP
+  ///   socket whose receive-packet capacity reaches the configured per-pump gossip
+  ///   read cap, an unusable encryption keyring, or a machine-endpoint init
+  ///   failure).
   /// - [`InitError::Entropy`] — the platform [`getrandom`] backend failed while
   ///   seeding the default gossip RNG.
   ///
@@ -293,12 +298,14 @@ where
   /// - [`InitError::NoAddresses`] — the resolver returned no address for the
   ///   advertise address.
   /// - [`InitError::Engine`] — the shared engine rejected the configuration (zero
-  ///   port / close-timeout, a non-routable or port-mismatched advertise address,
-  ///   an over-ceiling gossip MTU, a gossip UDP socket whose receive-packet
-  ///   capacity reaches the engine's per-pump gossip read cap
-  ///   ([`memberlist_embedded::Options::gossip_read_cap`], defaulting to
-  ///   [`memberlist_embedded::GOSSIP_READ_CAP`]), an unusable encryption keyring,
-  ///   or a machine-endpoint init failure).
+  ///   port / close-timeout, a zero
+  ///   [`Options::gossip_read_cap`](crate::Options::gossip_read_cap) /
+  ///   [`max_pending_seeds`](crate::Options::max_pending_seeds) /
+  ///   [`max_pending_dials`](crate::Options::max_pending_dials), a non-routable or
+  ///   port-mismatched advertise address, an over-ceiling gossip MTU, a gossip UDP
+  ///   socket whose receive-packet capacity reaches the configured per-pump gossip
+  ///   read cap, an unusable encryption keyring, or a machine-endpoint init
+  ///   failure).
   ///
   /// # Panics
   ///
@@ -527,11 +534,59 @@ where
   /// [`SocketAddrResolver`](crate::SocketAddrResolver) and wrap each seed in
   /// [`MaybeResolved::Resolved`].
   ///
-  /// Enqueues a push/pull to each resolved seed on the engine, then parks until
-  /// `is_joined()` (woken by the Runner on each membership change, with a short
-  /// timer backstop so a missed wake never hangs). A non-routable seed is dropped
-  /// by the engine. The caller owns the overall deadline (drive this under a
-  /// `select` with a timeout).
+  /// The resolved seeds are REGISTERED with the node's join loop, which offers the
+  /// union of every live join's seeds to the engine once per interval until each of
+  /// them completes; this future then parks until `is_joined()`. Every parked join owns
+  /// a waker entry of its own, so both wake sources — a Runner that drained an event
+  /// ADDING a member, and [`leave`](Self::leave) — reach EVERY one of them, however
+  /// many joins and however many tasks they are spread over. Nothing else wakes them:
+  /// the node's other traffic cannot change either answer this future re-checks, and
+  /// the re-offer below is paced by the Runner's own clock rather than by a wake.
+  ///
+  /// A call's REGISTRATION is withdrawn when its future ends — returned,
+  /// cancelled or dropped: no further node offer carries its seeds. Seeds the
+  /// engine already queued from an earlier offer are still admitted on later
+  /// pumps, and an exchange already started runs to its own deadline regardless.
+  /// A non-routable seed is dropped by the engine. The caller owns the overall
+  /// deadline (drive this under a `select` with a timeout).
+  ///
+  /// Offers are paced node-wide: at most one union offer per interval, on a clock
+  /// measured from the node's last offer rather than from this call. A join registered
+  /// within an interval of that offer therefore has its seeds dialed at the END of that
+  /// interval — a first-offer delay of at most one interval — which is also what keeps
+  /// a failing seed one join drops and another re-offers from being dialed twice inside
+  /// one interval.
+  ///
+  /// # Retry
+  ///
+  /// The registered seeds are RE-OFFERED while the node is still not joined, because
+  /// a single attempt per seed is not enough: a seed dial can lose the race for the
+  /// peer's single reliable listener (the peer RSTs the second concurrent connection
+  /// in its handshake window) and the engine then fails and forgets that
+  /// seed-originated exchange. Without a re-offer nothing would be outstanding and
+  /// this future would wait out the caller's whole deadline; with one, the seed is
+  /// re-queued as soon as its failed exchange is gone and the join completes the
+  /// moment the peer can accept again.
+  ///
+  /// What bounds the retry is the engine's own admission (see
+  /// [`Engine::join`](memberlist_embedded::Engine::join)): a seed already queued,
+  /// or already covered by a live join-originated exchange, is deduped rather than
+  /// dialed a second time, so a re-offer never duplicates an attempt in flight, and
+  /// surplus distinct seeds past
+  /// [`max_pending_seeds`](crate::Options::max_pending_seeds) are dropped and
+  /// counted. Re-offers are additionally paced so a peer that RSTs every dial
+  /// cannot drive a dial/fail/re-offer spin. Waiting stops when the node is joined
+  /// (`Ok`), the node is no longer running (`Err(OpError::NotRunning)`), or the
+  /// [`Runner`](crate::Runner) re-offering the seeds is gone
+  /// (`Err(OpError::RunnerStopped)`).
+  ///
+  /// Concurrent joins SHARE that one offer, rather than each running a loop of their
+  /// own. The engine's round-robin over a full seed queue guarantees only what ONE
+  /// offer names, so separate loops offering disjoint lists would share one rotation
+  /// blind to each other's addresses; the union covers all of their seeds together.
+  /// Sharing the offer is also what bounds the work and the wire traffic: F
+  /// concurrent joins cost one offer and one dial per seed per interval, not F of
+  /// each, however many of them name the same fast-failing seed.
   ///
   /// # Errors
   ///
@@ -540,16 +595,37 @@ where
   /// concurrent with this call's seed resolution also yields `NotRunning`: the
   /// running state is re-checked before each unresolved seed, so no seed past the
   /// leave is resolved (a resolve already in flight when the leave lands completes,
-  /// but its result is discarded). Otherwise returns `Err(OpError::Resolve)` if the
-  /// resolver fails on a seed, or `Err(OpError::NoAddresses)` if a non-empty seed
-  /// set resolves to no address.
+  /// but its result is discarded). A `leave()` while this future is already parked
+  /// awaiting convergence yields `NotRunning` too, and never `Ok`: the running state
+  /// is re-checked ahead of the membership test each time the wait resumes, so a
+  /// node that joined and was then left is reported as left rather than as a
+  /// successful join. Otherwise returns `Err(OpError::Resolve)` if the resolver fails
+  /// on a seed, or `Err(OpError::NoAddresses)` if a non-empty seed set resolves to no
+  /// address.
+  ///
+  /// Returns `Err(OpError::RunnerStopped)` — checked ahead of the lifecycle, at the
+  /// call and on every pass of the wait — once the [`Runner`](crate::Runner) driving
+  /// this node is gone. It is the stronger answer: the pump is what offers the seeds
+  /// and drains the membership this call waits on, so with it gone the join can
+  /// never converge whatever the node's own lifecycle says. A join already parked
+  /// when the run future is dropped is woken and returns it rather than waiting out
+  /// the caller's deadline.
   pub async fn join<Res>(&self, resolver: &Res, seeds: &[MaybeResolved<A>]) -> Result<(), OpError>
   where
     Res: AddressResolver<Address = A>,
   {
-    // Reject a left node before anything else. A node that joined and then left
-    // still has members, so the `is_joined` fast path below must not run first —
-    // it would mask the left state and report a bogus successful join.
+    // Reject a node whose run loop is gone before anything else, including the
+    // lifecycle. It is the stronger fact: the pump is what would carry this join to
+    // convergence, so with it gone no seed is dialed, no membership changes and no
+    // wake arrives — the answer cannot become anything else however the node's own
+    // lifecycle reads.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
+
+    // Then reject a left node. A node that joined and then left still has members,
+    // so the `is_joined` fast path below must not run first — it would mask the left
+    // state and report a bogus successful join.
     self
       .shared
       .engine
@@ -599,33 +675,80 @@ where
       return Err(OpError::NoAddresses);
     }
 
+    // Check the lifecycle where the first offer used to be made, so a `leave()` that
+    // landed after the last seed resolved surfaces as `NotRunning` before this call
+    // registers anything or wakes the node's join loop.
     self
       .shared
       .engine
-      .borrow_mut()
-      .join(&resolved)
+      .borrow()
+      .ensure_running()
       .map_err(|_| OpError::NotRunning)?;
+
+    // Register the seeds with the node's join loop and wake it. The Runner makes ONE
+    // offer per interval carrying every live join's seeds, so this future offers
+    // nothing itself: it registers and waits. The guard releases these seeds on every
+    // exit path — a normal return, a `?`, or the caller dropping the future at one of
+    // its awaits — so a join that is no longer running leaves nothing in the node's
+    // offer behind it.
+    let offer = self.shared.register_join_offer(&resolved);
     self.shared.wake_pump();
 
-    // Park until joined. The Runner pulses `join_wake` on every membership change;
-    // race it against a short timer so a wake the single-consumer signal delivered
-    // to another concurrent joiner only costs an interval, never a hang.
+    // Wait for convergence. The node notifies every parked join when the Runner
+    // drained an event that ADDED a member, and `leave()` notifies too. Those are the
+    // only two wake sources that can change an answer, and they are exactly enough:
+    // neither of the checks below can change its answer without one of them, and
+    // every other event a pump drains leaves both answers where they were. A run
+    // future that goes away notifies as well — not because it changed either of
+    // those answers, but because it took both sources away and left a third,
+    // terminal answer in their place, so a join parked across it wakes, reads that
+    // answer and returns instead of waiting on a wake that can no longer come. A
+    // seed exchange that failed needs no wake of its own — nothing here would re-dial
+    // it, and the re-offer that does is paced by the Runner's own offer clock. This
+    // join has its own waker entry, so it never depends on some other joiner having
+    // been woken in its place.
     loop {
+      // Read the notify epoch BEFORE the checks below. The wait resolves at once when
+      // the epoch has moved since, so a notify that lands after these checks have read
+      // their state cannot be slept through — the loop simply re-runs them. Reading
+      // the epoch after the checks would leave exactly that window unobserved, and
+      // with no timer under the wait a lost notify would be a hang rather than a
+      // delay.
+      let seen = self.shared.join_epoch();
+      // The run loop going away is checked first and AFTER the epoch read, which is
+      // what makes the wake it sends impossible to lose: the stop sets this flag and
+      // only then notifies, so a stop landing between this check and the park moves
+      // the epoch, resolves the wait at once, and the re-run reads the flag. Without
+      // the check the woken join would find both answers below unchanged — the
+      // engine can still be running when its runner is gone — and park again on a
+      // wake that can no longer come.
+      if self.shared.runner_stopped() {
+        return Err(OpError::RunnerStopped);
+      }
+      // Lifecycle before membership, on every pass. `leave()` does not clear the
+      // member list, so `is_joined()` still holds for a node another handle clone
+      // left while this future was parked — and reporting a successful join for a
+      // node that is leaving would contradict the running guard this method opens
+      // with. The engine's own state is the authority, so the check reads it rather
+      // than tracking the leave.
+      self
+        .shared
+        .engine
+        .borrow()
+        .ensure_running()
+        .map_err(|_| OpError::NotRunning)?;
       if shared::is_joined(&self.shared) {
         return Ok(());
       }
-      // Ignoring the `Either`: whichever of the membership wake or the timer fired,
-      // the loop simply re-checks `is_joined`.
-      let _ = embassy_futures::select::select(
-        self.shared.join_wake.wait(),
-        Timer::after(embassy_time::Duration::from_millis(20)),
-      )
-      .await;
+      self.shared.join_wait(offer.id(), seen).await;
     }
   }
 
   /// Begin leaving the cluster (gossip the departure). Returns immediately after
   /// enqueuing; the `LeftCluster` event surfaces via [`poll_event`](Self::poll_event).
+  ///
+  /// EVERY [`join`](Self::join) parked awaiting convergence is woken, so each of them
+  /// reports `NotRunning` at once rather than waiting on a wake that went elsewhere.
   ///
   /// Returns `Err(OpError::NotRunning)` if the node is not in a running state
   /// (already left or never started).
@@ -638,6 +761,7 @@ where
       .leave(now)
       .map_err(|_| OpError::NotRunning);
     self.shared.wake_pump();
+    self.shared.notify_join_waiters();
     r
   }
 
@@ -648,14 +772,31 @@ where
   /// Issues the ping on the engine (correlation token: [`PingId`]) and parks on a
   /// per-request signal the Runner fires on the matching `PingCompleted` /
   /// `PingFailed`.
+  ///
+  /// Returns [`OpError::RunnerStopped`] when the [`Runner`](crate::Runner) driving
+  /// this node is gone — the probe would have nothing to send it or time it out —
+  /// and [`OpError::NotRunning`] when the node itself has left. A target the engine
+  /// refuses for its own reason (a framed `Ping` past the gossip datagram budget, an
+  /// identity the compact wire layout cannot encode) is reported as
+  /// [`OpError::Rejected`] carrying that error, never as a lifecycle answer.
   pub async fn ping(&self, node: Node<I, SocketAddr>) -> Result<Duration, OpError> {
+    // Nothing would carry the probe or its deadline once the run loop is gone, so
+    // refuse here rather than register a waiter that only the pump could ever
+    // resolve.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
     let now = time::now();
-    let ping_id: PingId = self
-      .shared
-      .engine
-      .borrow_mut()
-      .ping(node, now)
-      .map_err(|_| OpError::NotRunning)?;
+    let ping_id: PingId = match self.shared.engine.borrow_mut().ping(node, now) {
+      Ok(id) => id,
+      Err(memberlist_proto::Error::NotRunning) => return Err(OpError::NotRunning),
+      // The engine also refuses a target whose framed `Ping` would not fit one gossip
+      // datagram, or whose identity the compact wire layout cannot encode — and its
+      // error type is `#[non_exhaustive]`, so it may grow more. None of those is a
+      // lifecycle answer, and reporting them as one would tell the caller the node
+      // had left when it is running and the TARGET is what it cannot accept.
+      Err(e) => return Err(OpError::Rejected(e)),
+    };
     let reply = self.shared.register_ping(ping_id);
     self.shared.wake_pump();
     reply.wait().await
@@ -687,7 +828,7 @@ where
   }
 
   /// Reliably deliver `payload` to `to` over a dedicated TCP stream, resolving
-  /// once the exchange completes (`Ok`) or fails ([`OpError::SendFailed`]).
+  /// once the exchange completes (`Ok`) or fails.
   ///
   /// Issues the user-message exchange on the engine and parks on a signal the
   /// Runner fires when THIS send's exchange terminates. Completion is correlated
@@ -695,18 +836,60 @@ where
   /// `Connect`), so overlapping or out-of-order completions — concurrent sends, or
   /// sends to different peers finishing in any order — each resolve their own
   /// caller, never by arrival order.
+  ///
+  /// # Errors
+  ///
+  /// * [`OpError::DialBacklogFull`] — refused at the call site, before any
+  ///   exchange is built, because reliable dials already wait
+  ///   [`max_pending_dials`](memberlist_embedded::Options::max_pending_dials)
+  ///   beyond what the free pool could take. Backpressure on this node's own
+  ///   application load: pace the sends and retry once outstanding exchanges
+  ///   complete. The engine's post-pump ceiling can still shed a send admitted
+  ///   here, which surfaces as `SendFailed`.
+  /// * [`OpError::SendFailed`] — the exchange was dispatched but terminated
+  ///   without success (dial failure, decode/record fault, or deadline).
+  /// * [`OpError::NotRunning`] — the machine refused the operation because the
+  ///   node is no longer in a running state (e.g. it has left the cluster).
+  /// * [`OpError::RunnerStopped`] — the [`Runner`](crate::Runner) driving this node
+  ///   is gone, so the exchange would have nothing to dial it or complete it.
+  /// * [`OpError::Rejected`] — the engine refused the send for some other reason,
+  ///   carried as the engine's own error. Its error type is `#[non_exhaustive]`, so
+  ///   a refusal this driver does not translate is reported as itself rather than
+  ///   reported as one of the answers above, each of which would tell the caller
+  ///   something specific and wrong.
   pub async fn send_reliable(&self, to: SocketAddr, payload: bytes::Bytes) -> Result<(), OpError>
   where
     // Dispatching a reliable exchange schedules gossip work that draws from the RNG.
     R: Rng,
   {
+    // Refuse before the engine builds an exchange: with the run loop gone nothing
+    // dials the peer, and the completion this call would park on is only ever
+    // emitted by the pump.
+    if self.shared.runner_stopped() {
+      return Err(OpError::RunnerStopped);
+    }
     let now = time::now();
-    let sid: StreamId = self
+    let dispatched = self
       .shared
       .engine
       .borrow_mut()
-      .send_reliable(to, payload, now)
-      .map_err(|_| OpError::NotRunning)?;
+      .send_reliable(to, payload, now);
+    let sid: StreamId = match dispatched {
+      Ok(sid) => sid,
+      // A full dial backlog is call-site backpressure on this node's OWN load, so it
+      // must stay distinguishable from the lifecycle refusal: the caller can pace and
+      // retry the first, while the second says the node will never send again.
+      Err(memberlist_proto::Error::UserDialBacklogFull(_)) => {
+        return Err(OpError::DialBacklogFull);
+      }
+      Err(memberlist_proto::Error::NotRunning) => return Err(OpError::NotRunning),
+      // The engine's error type is `#[non_exhaustive]`, so this arm is every refusal
+      // it may grow that is neither of the two above. Carrying it through is the only
+      // honest answer: reporting one of those would tell the caller either that
+      // retrying is pointless or that pacing will clear it, and a refusal that means
+      // something else supports neither claim.
+      Err(e) => return Err(OpError::Rejected(e)),
+    };
     let reply = self.shared.register_send(sid);
     self.shared.wake_pump();
     reply.wait().await
@@ -965,6 +1148,63 @@ where
   #[inline]
   pub fn pending_dial_count(&self) -> usize {
     self.shared.engine.borrow().pending_dial_count()
+  }
+
+  // ── Join-seed diagnostics (test/operator visibility) ─────────────────────────
+
+  /// Number of distinct seed addresses the [`join`](Self::join) calls currently
+  /// live on this handle are offering between them — the size of the union each of
+  /// them hands the engine.
+  #[doc(hidden)]
+  #[inline]
+  pub fn join_offer_addr_count(&self) -> usize {
+    self.shared.join_offer_addr_count()
+  }
+
+  /// Number of join seeds the engine has queued but not yet handed to the machine.
+  #[doc(hidden)]
+  #[inline]
+  pub fn pending_seed_count(&self) -> usize {
+    self.shared.engine.borrow().pending_seed_count()
+  }
+
+  /// Diagnostic count of join seeds the engine shed because its queue was already
+  /// at [`Options::max_pending_seeds`](crate::Options::max_pending_seeds).
+  #[doc(hidden)]
+  #[inline]
+  pub fn join_seeds_dropped(&self) -> u64 {
+    self.shared.engine.borrow().join_seeds_dropped()
+  }
+
+  /// Diagnostic count of join seeds the engine skipped as already queued or already
+  /// covered by a live join exchange.
+  #[doc(hidden)]
+  #[inline]
+  pub fn join_seeds_deduped(&self) -> u64 {
+    self.shared.engine.borrow().join_seeds_deduped()
+  }
+
+  /// Run the node's join-offer step here and now, reporting whether it offered.
+  ///
+  /// The SAME step the [`Runner`] takes at the top of each pump — pacing included,
+  /// so a second call inside one interval reports `false` — exposed for tests that
+  /// drive no run loop and would otherwise observe no offer at all.
+  #[doc(hidden)]
+  #[inline]
+  pub fn offer_join_seeds_now(&self) -> bool {
+    self.shared.offer_join_seeds_at(time::now()).0
+  }
+
+  /// Drain the machine's pending events here and now, resolving the handle ops they
+  /// terminate and waking every parked [`join`](Self::join) if one of them added a
+  /// member.
+  ///
+  /// The SAME step the [`Runner`] takes after each pump, exposed for tests that drive
+  /// no run loop and would otherwise leave every emitted event queued in the machine.
+  #[doc(hidden)]
+  #[inline]
+  pub fn drain_events_now(&self) {
+    self.shared.drain_events();
   }
 
   /// Replace the gossip+stream compression policy at runtime. Returns
