@@ -127,7 +127,7 @@ async fn a_tcp_led_attempt_releases_its_listener_when_udp_refuses_the_port() {
   );
 
   // The attempt's own listener is gone, so the TCP half is claimable again.
-  let reclaimed = TcpListener::bind(bound)
+  let reclaimed = bind_tcp_exclusive(bound)
     .await
     .expect("the failed attempt must have released its listener");
   // Ignoring Err: the reclaimed listener exists only to prove the port came
@@ -164,12 +164,52 @@ async fn a_udp_led_attempt_releases_its_gossip_socket_when_tcp_refuses_the_port(
     "the failure must be one the alternating retry can get past",
   );
 
-  let reclaimed = UdpSocket::bind(bound)
+  let reclaimed = bind_udp_exclusive(bound)
     .await
     .expect("the failed attempt must have released its gossip socket");
   // Ignoring Err: the reclaimed socket exists only to prove the port came back.
   let _ = reclaimed.close().await;
   let _ = listener.close().await;
+}
+
+/// A pair cannot be claimed on a TCP port an unrelated listener already owns.
+///
+/// This is the direct check that a claim never SHARES a port. The listener here
+/// belongs to no memberlist node, so a claim that succeeded against it would
+/// have split that owner's incoming connections between two accept queues —
+/// and, on Windows, would have done so silently, because there an address-reuse
+/// option on the second bind is enough to take the port from its owner.
+#[compio::test]
+async fn an_occupied_tcp_port_cannot_be_claimed_by_a_pair() {
+  let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a plain listener binds");
+  let occupied = held.local_addr().expect("the held listener addr");
+
+  let claimed = bind_stream_pair(occupied).await.map(|(_, bound, _)| bound);
+  assert!(
+    claimed.is_err(),
+    "a pair took a TCP port an unrelated listener owns: {claimed:?}",
+  );
+
+  drop(held);
+}
+
+/// A pair cannot be claimed on a UDP port an unrelated socket already owns.
+///
+/// The gossip mirror of the case above, and the worse one: two sockets sharing
+/// a UDP port receive each other's datagrams in an order no platform defines,
+/// so a claim that succeeded here would lose gossip with nothing to observe it.
+#[compio::test]
+async fn an_occupied_udp_port_cannot_be_claimed_by_a_pair() {
+  let held = std::net::UdpSocket::bind("127.0.0.1:0").expect("a plain socket binds");
+  let occupied = held.local_addr().expect("the held socket addr");
+
+  let claimed = bind_stream_pair(occupied).await.map(|(_, bound, _)| bound);
+  assert!(
+    claimed.is_err(),
+    "a pair took a UDP port an unrelated socket owns: {claimed:?}",
+  );
+
+  drop(held);
 }
 
 /// An ephemeral bind that fails for a reason no other port can fix surfaces at
