@@ -110,7 +110,9 @@ pub struct Options {
   /// offered past it is dropped rather than failing the call. The engine's field
   /// docs carry the full contract.
   ///
-  /// Must be non-zero. Defaults to
+  /// Must be non-zero and at most
+  /// [`memberlist_embedded::MAX_PENDING_SEEDS_CEILING`], which the engine reserves
+  /// its join buffers at during construction. Defaults to
   /// [`memberlist_embedded::DEFAULT_MAX_PENDING_SEEDS`].
   pub max_pending_seeds: usize,
   /// The engine's parked-dial ceiling, forwarded to
@@ -199,7 +201,8 @@ impl Options {
   }
 
   /// Override the engine's join-seed queue ceiling (see
-  /// [`Options::max_pending_seeds`]). Must be non-zero.
+  /// [`Options::max_pending_seeds`]). Must be non-zero and at most
+  /// [`memberlist_embedded::MAX_PENDING_SEEDS_CEILING`].
   pub fn with_max_pending_seeds(mut self, cap: usize) -> Self {
     self.max_pending_seeds = cap;
     self

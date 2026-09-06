@@ -17,6 +17,10 @@ fn every_init_error_variant_displays_and_reports_its_source() {
     (InitError::ZeroCloseTimeout, false),
     (InitError::ZeroGossipReadCap, false),
     (InitError::ZeroMaxPendingSeeds, false),
+    (
+      InitError::MaxPendingSeedsTooLarge(crate::MAX_PENDING_SEEDS_CEILING + 1),
+      false,
+    ),
     (InitError::ZeroMaxPendingDials, false),
     (
       InitError::GossipMtuTooLarge(GossipMtuTooLarge {
@@ -66,5 +70,18 @@ fn gossip_mtu_too_large_display_carries_both_values() {
       gossip_mtu: 70_000,
       ceiling: 65_000
     }
+  );
+}
+
+/// The over-ceiling seed-cap error names both the value that was rejected and the
+/// ceiling it breached, so a caller can correct the knob without reading the docs.
+#[test]
+fn max_pending_seeds_too_large_display_carries_the_value_and_the_ceiling() {
+  let over = crate::MAX_PENDING_SEEDS_CEILING + 1;
+  let shown = InitError::MaxPendingSeedsTooLarge(over).to_string();
+  assert!(
+    shown.contains(&over.to_string())
+      && shown.contains(&crate::MAX_PENDING_SEEDS_CEILING.to_string()),
+    "got {shown}"
   );
 }

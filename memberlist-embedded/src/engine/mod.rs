@@ -31,7 +31,7 @@ use hashbrown::HashMap;
 use smallvec_wrapper::MediumVec;
 
 use crate::{
-  GossipIo, InitError, Options, SlotGen, StreamIo, TransformOptions,
+  GossipIo, InitError, MAX_PENDING_SEEDS_CEILING, Options, SlotGen, StreamIo, TransformOptions,
   addr::socket_addr_is_routable,
   cidr::{CidrFilter, cidr_blocks},
   error::GossipMtuTooLarge,
@@ -208,6 +208,16 @@ pub fn validate_runtime_config(
   // silently dropped every seed it was handed.
   if cfg.max_pending_seeds == 0 {
     return Err(InitError::ZeroMaxPendingSeeds);
+  }
+
+  // Reject a join-seed ceiling past what construction may reserve. All three join
+  // buffers — the queue, the ranking window and the per-pump seed id set — are
+  // reserved at this value up front, so an out-of-range one taken from a runtime
+  // source would reach the allocator directly, and a failed allocation on
+  // `no_std` + `alloc` aborts instead of returning an `InitError`. Screening the
+  // knob keeps every misconfiguration a typed rejection naming the field.
+  if cfg.max_pending_seeds > MAX_PENDING_SEEDS_CEILING {
+    return Err(InitError::MaxPendingSeedsTooLarge(cfg.max_pending_seeds));
   }
 
   // Reject a zero parked-dial ceiling. A dial is admitted only while the excess
@@ -449,12 +459,19 @@ pub struct Engine<I, C, R = SmallRng> {
   ///
   /// A `Connect` action carries no origin, so this is how the drain tells a seed's
   /// dial apart from an application send's or the machine's own: the drain removes
-  /// the matching id and parks the connection with `from_seed` set. Bounded by the
-  /// seed drain itself, which admits at most the free pool plus one head per pump,
-  /// and cleared at the end of every `drain_stream_actions` — every admission made
-  /// this pump has surfaced its `Connect` by then, and one that failed before ever
-  /// reaching a `Connect` never will.
-  seed_stream_ids: MediumVec<StreamId>,
+  /// the matching id and parks the connection with `from_seed` set. Cleared at the
+  /// end of every `drain_stream_actions` — every admission made this pump has
+  /// surfaced its `Connect` by then, and one that failed before ever reaching a
+  /// `Connect` never will.
+  ///
+  /// Reserved at [`Options::max_pending_seeds`] at construction and never grown.
+  /// Every admission POPS the seed it records from `pending_seeds`, and `join` —
+  /// the only thing that pushes there — cannot run inside a pump, so one pump
+  /// records at most the entries the queue held when it started: the cap itself.
+  /// An inline buffer would spill to the heap mid-pump on any seed list longer
+  /// than its inline capacity, which is the one place a constrained node must not
+  /// allocate.
+  seed_stream_ids: Vec<StreamId>,
   /// Count of offered join-seed entries one call had no room to queue: the surplus
   /// beyond the free queue slots that call found, plus the entry it leaves the
   /// rotation on.
@@ -1812,12 +1829,17 @@ where
       .set_checksum_options(transform.checksum)
       .map_err(InitError::Checksum)?;
 
-    // Reserve both join-admission buffers at their configured bounds, so the join
-    // path allocates here — once, where a driver can account for it — and never on a
-    // `join` or a pump. The queue holds at most `max_pending_seeds` addresses, and
-    // the ranking window at most one more (the entry that names the next rotation).
+    // Reserve all three join buffers at their configured bounds, so the join path
+    // allocates here — once, where a driver can account for it — and never on a
+    // `join` or a pump. The queue holds at most `max_pending_seeds` addresses, the
+    // ranking window at most one more (the entry that names the next rotation), and
+    // one pump's seed id set at most one id per queued seed. `max_pending_seeds` is
+    // screened against `MAX_PENDING_SEEDS_CEILING` by `validate_runtime_config`
+    // above, so these reservations are bounded by a documented constant rather than
+    // by whatever the caller supplied.
     let pending_seeds = VecDeque::with_capacity(cfg.max_pending_seeds);
     let join_window = Vec::with_capacity(cfg.max_pending_seeds.saturating_add(1));
+    let seed_stream_ids = Vec::with_capacity(cfg.max_pending_seeds);
 
     Ok(Self {
       endpoint,
@@ -1832,7 +1854,7 @@ where
       label,
       cidr_policy,
       api_dials_since_pump: 0,
-      seed_stream_ids: MediumVec::new(),
+      seed_stream_ids,
       join_seeds_dropped: 0,
       join_seeds_deduped: 0,
       join_seeds_refused: 0,

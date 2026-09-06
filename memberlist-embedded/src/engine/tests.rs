@@ -2127,6 +2127,71 @@ fn selection_window_is_bounded_and_counts_stay_exact() {
   );
 }
 
+/// One pump's seed id set fits the room construction reserved, however many seeds
+/// the pump admits.
+///
+/// The set records one id per seed the pump hands the machine, and every admission
+/// POPS the seed it records from a queue the cap bounds — `join`, the only thing
+/// that refills it, cannot run inside a pump — so a pump can never record more ids
+/// than the cap. Reserving exactly that at construction is what keeps the recording
+/// off the allocator: an inline buffer spills to the heap the moment a pump admits
+/// past its inline capacity, mid-pump, on the tier that can least afford it. The cap
+/// here is deliberately larger than any small inline buffer would hold.
+#[test]
+fn one_pumps_seed_ids_fit_the_room_reserved_at_construction() {
+  const CAP: usize = 12;
+
+  let cfg = admission_cfg().with_max_pending_seeds(CAP);
+  let ep_cfg = memberlist_proto::EndpointOptions::new(SmolStr::new("test"), node_addr(7946));
+  let (mut engine, now) = engine_from(cfg, ep_cfg);
+
+  assert!(
+    engine.seed_stream_ids.capacity() >= CAP,
+    "construction reserves one id per seed the cap admits, got {}",
+    engine.seed_stream_ids.capacity()
+  );
+  let reserved = engine.seed_stream_ids.capacity();
+
+  // A slot per seed, so one pump admits the whole queue in its bulk loop.
+  let handles: Vec<u32> = (1..=CAP as u32).collect();
+  for &h in &handles {
+    engine.plane_mut().pool.push(h);
+  }
+  let mut listen_and_pool = handles.clone();
+  listen_and_pool.push(99);
+  let mut stream = ProgRel::new(&listen_and_pool);
+  engine.set_listener(99);
+  stream
+    .listen(99, 7946, crate::SlotGen::START)
+    .expect("mock listen succeeds");
+
+  let seeds: Vec<SocketAddr> = (0..CAP as u16).map(|i| node_addr(7002 + i)).collect();
+  engine.join(&seeds).expect("join is accepted");
+  assert_eq!(
+    engine.pending_seed_count(),
+    CAP,
+    "the queue must hold the whole offer for the pump to admit"
+  );
+
+  let mut gossip = NoGossip;
+  engine.pump(now, &mut gossip, &mut stream);
+
+  assert_eq!(
+    stream.connects.len(),
+    CAP,
+    "every queued seed must be admitted and dialed in this one pump, so the id set      really was filled to the cap"
+  );
+  assert_eq!(
+    engine.seed_stream_ids.capacity(),
+    reserved,
+    "and having recorded all of them, the pump did not grow the set — it allocated      nothing"
+  );
+  assert!(
+    engine.seed_stream_ids.is_empty(),
+    "the ids are spent at the end of the action drain, so the next pump starts empty"
+  );
+}
+
 /// The ranking window a long offer runs never holds more than `max_pending_seeds + 1`
 /// candidates, even when every entry ranks ahead of everything already held.
 ///
@@ -3507,6 +3572,57 @@ fn zero_admission_caps_are_rejected_as_the_knobs_they_are() {
       "{name}: construction must reject the zeroed knob too"
     );
   }
+}
+
+/// A join-seed cap past `MAX_PENDING_SEEDS_CEILING` is rejected as the knob it is,
+/// by the shared preflight and by construction alike.
+///
+/// The cap is not only an admission bound: construction RESERVES the seed queue,
+/// the join ranking window and the per-pump seed id set at it. Without the screen
+/// a value taken from a runtime source would size those reservations directly, and
+/// a failed allocation on `no_std` + `alloc` aborts the process — the one outcome
+/// `InitError` exists to replace. The ceiling itself must still be accepted, or the
+/// screen would be rejecting a documented-legal configuration.
+#[test]
+fn an_over_ceiling_seed_cap_is_rejected_as_the_knob_it_is() {
+  let now = Instant::from_origin(Duration::from_secs(86_400));
+  let over = crate::MAX_PENDING_SEEDS_CEILING + 1;
+  let cfg = admission_cfg().with_max_pending_seeds(over);
+
+  match validate_runtime_config(&cfg, &TransformOptions::default(), 1400) {
+    Err(InitError::MaxPendingSeedsTooLarge(reported)) => assert_eq!(
+      reported, over,
+      "the rejection must carry the value the caller supplied"
+    ),
+    other => panic!("the preflight must name the over-ceiling knob, got {other:?}"),
+  }
+
+  let rejected: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+    cfg,
+    TransformOptions::default(),
+    memberlist_proto::EndpointOptions::new(SmolStr::new("over"), node_addr(7946)),
+    now,
+    test_rng(),
+    &NoGossip,
+  );
+  assert!(
+    matches!(rejected, Err(InitError::MaxPendingSeedsTooLarge(v)) if v == over),
+    "construction must reject the over-ceiling knob before it reserves anything"
+  );
+
+  // The ceiling itself is a legal configuration and still constructs.
+  let at_ceiling: Result<Engine<SmolStr, u32>, _> = Engine::try_new_at(
+    admission_cfg().with_max_pending_seeds(crate::MAX_PENDING_SEEDS_CEILING),
+    TransformOptions::default(),
+    memberlist_proto::EndpointOptions::new(SmolStr::new("at"), node_addr(7946)),
+    now,
+    test_rng(),
+    &NoGossip,
+  );
+  assert!(
+    at_ceiling.is_ok(),
+    "the ceiling is the largest ACCEPTED cap, not the first rejected one"
+  );
 }
 
 /// A reliable exchange whose dial connects but whose handshake never completes is

@@ -905,6 +905,36 @@ fn zero_max_pending_seeds_rejected() {
   );
 }
 
+/// A `max_pending_seeds` past the engine's ceiling is rejected as the knob itself,
+/// and under its own name.
+///
+/// The engine reserves its seed queue, its join ranking window and its per-pump seed
+/// id set at the cap, so an out-of-range value would size those reservations
+/// directly and a failed allocation would abort rather than return an error. The
+/// verdict comes from the ENGINE's config preflight, which construction runs before
+/// it touches the link layer; the driver maps it to its own variant so the caller is
+/// told which option to lower, not handed a generic endpoint failure.
+#[test]
+fn over_ceiling_max_pending_seeds_rejected() {
+  let over = memberlist_embedded::MAX_PENDING_SEEDS_CEILING + 1;
+  let mut dev = smoltcp::phy::Loopback::new(Medium::Ip);
+  let now: Instant = harness::Clock::new().now();
+  let res: Result<Memberlist<SmolStr, SocketAddr, _>, _> = Memberlist::try_new(
+    Options::new().with_max_pending_seeds(over),
+    InterfaceOptions::new(HardwareAddress::Ip).with_ip_addr(ip_cidr(1)),
+    TransformOptions::default(),
+    ep("a", 1),
+    &SocketAddrResolver,
+    &mut dev,
+    now,
+  );
+  assert!(
+    matches!(res, Err(InitError::MaxPendingSeedsTooLarge(v)) if v == over),
+    "an over-ceiling max_pending_seeds must be rejected as MaxPendingSeedsTooLarge \
+     carrying the configured value"
+  );
+}
+
 /// A zero `max_pending_dials` is rejected as the knob itself. The cap bounds parked
 /// dials in EXCESS of the free pool, so zero refuses every dial the pool cannot
 /// absorb at once — including the first one made while the pool is momentarily

@@ -35,7 +35,8 @@ pub mod transform;
 
 pub use addr::socket_addr_is_routable;
 pub use config::{
-  DEFAULT_CLOSE_TIMEOUT, DEFAULT_MAX_PENDING_DIALS, DEFAULT_MAX_PENDING_SEEDS, Options,
+  DEFAULT_CLOSE_TIMEOUT, DEFAULT_MAX_PENDING_DIALS, DEFAULT_MAX_PENDING_SEEDS,
+  MAX_PENDING_SEEDS_CEILING, Options,
 };
 pub use engine::{Engine, GOSSIP_READ_CAP, validate_runtime_config};
 #[cfg(encryption)]

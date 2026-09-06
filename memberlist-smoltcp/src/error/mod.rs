@@ -262,6 +262,14 @@ pub enum InitError {
   /// every seed, and the node could never reach a cluster it was not told about by
   /// gossip. Must be non-zero.
   ZeroMaxPendingSeeds,
+  /// [`Options::max_pending_seeds`](crate::Options::max_pending_seeds) exceeds
+  /// [`MAX_PENDING_SEEDS_CEILING`](memberlist_embedded::MAX_PENDING_SEEDS_CEILING).
+  ///
+  /// The engine reserves its seed queue, its join ranking window and its per-pump
+  /// seed id set at the cap during construction, so an out-of-range value would
+  /// reach the allocator unscreened and abort the process instead of returning
+  /// here. The configured value is carried for diagnostics.
+  MaxPendingSeedsTooLarge(usize),
   /// [`Options::max_pending_dials`](crate::Options::max_pending_dials) is zero.
   ///
   /// The cap bounds how many reliable dials may wait BEYOND what the free TCP pool
@@ -433,6 +441,12 @@ impl fmt::Display for InitError {
       ),
       InitError::ZeroGossipReadCap => f.write_str("gossip_read_cap must be non-zero"),
       InitError::ZeroMaxPendingSeeds => f.write_str("max_pending_seeds must be non-zero"),
+      InitError::MaxPendingSeedsTooLarge(cap) => write!(
+        f,
+        "max_pending_seeds {cap} exceeds the maximum of {} (the engine's join \
+         buffers are reserved at it during construction)",
+        memberlist_embedded::MAX_PENDING_SEEDS_CEILING
+      ),
       InitError::ZeroMaxPendingDials => f.write_str("max_pending_dials must be non-zero"),
       InitError::ZeroIngressPacketsPerPoll => {
         f.write_str("ingress_packets_per_poll must be non-zero")
@@ -466,6 +480,7 @@ impl InitError {
       E::ZeroCloseTimeout => InitError::ZeroCloseTimeout,
       E::ZeroGossipReadCap => InitError::ZeroGossipReadCap,
       E::ZeroMaxPendingSeeds => InitError::ZeroMaxPendingSeeds,
+      E::MaxPendingSeedsTooLarge(cap) => InitError::MaxPendingSeedsTooLarge(cap),
       E::ZeroMaxPendingDials => InitError::ZeroMaxPendingDials,
       E::GossipMtuTooLarge(m) => InitError::GossipMtuTooLarge(GossipMtuTooLarge {
         gossip_mtu: m.gossip_mtu,

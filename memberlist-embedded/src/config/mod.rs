@@ -32,6 +32,30 @@ pub const DEFAULT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// address until the pump admits it, so the ceiling is on intent, not memory.
 pub const DEFAULT_MAX_PENDING_SEEDS: usize = 32;
 
+/// Ceiling on [`Options::max_pending_seeds`]: 1024 seed addresses.
+///
+/// The knob is not just an admission bound — construction RESERVES all three
+/// join buffers at it, so the configured number is allocated up front whether or
+/// not a seed is ever offered. An out-of-range value handed in from a runtime
+/// source would therefore reach the allocator directly, and on `no_std` + `alloc`
+/// a failed allocation aborts: the caller gets a dead process instead of the
+/// [`InitError`](crate::InitError) the type promises. Screening the knob turns
+/// that into a typed rejection naming the field.
+///
+/// 1024 is 128 seed names at [`MAX_RESOLVED_ADDRS_PER_SEED`](crate::MAX_RESOLVED_ADDRS_PER_SEED)
+/// resolved addresses each — 32× the default, and far past what any embedded node
+/// could service: a queue that deep takes `depth / pool` rounds of `stream_timeout`
+/// to work through, minutes of it on a pool of four.
+///
+/// At the ceiling the three reserved buffers cost, on a 64-bit target,
+/// `1024 × size_of::<SocketAddr>()` (32 KiB) for the seed queue,
+/// `1025 × size_of::<(SocketAddr, usize)>()` (~40 KiB) for the ranking window and
+/// `1024 × size_of::<StreamId>()` (8 KiB) for the per-pump id set: ~80 KiB, and
+/// ~76 KiB where `usize` is 32-bit. That is the worst case an integrator sizes the
+/// heap for. The ceiling BOUNDS that arithmetic; it does not promise the allocator
+/// can satisfy it, so a node whose heap is smaller must configure a smaller cap.
+pub const MAX_PENDING_SEEDS_CEILING: usize = 1024;
+
 /// Default [`Options::max_pending_dials`]: 8 dials waiting on a pool that could
 /// back none of them.
 ///
@@ -120,7 +144,10 @@ pub struct Options {
   /// deadline anyway — each unreachable seed occupies a slot for a full
   /// `stream_timeout`.
   ///
-  /// Must be non-zero ([`InitError::ZeroMaxPendingSeeds`](crate::InitError::ZeroMaxPendingSeeds));
+  /// Must be non-zero ([`InitError::ZeroMaxPendingSeeds`](crate::InitError::ZeroMaxPendingSeeds))
+  /// and at most [`MAX_PENDING_SEEDS_CEILING`]
+  /// ([`InitError::MaxPendingSeedsTooLarge`](crate::InitError::MaxPendingSeedsTooLarge)),
+  /// because construction reserves the join buffers at it;
   /// [`DEFAULT_MAX_PENDING_SEEDS`] is the default.
   pub max_pending_seeds: usize,
   /// Largest number of caller- and protocol-originated reliable dials that may stay
@@ -211,7 +238,7 @@ impl Options {
   }
 
   /// Override the join-seed queue ceiling (see [`Options::max_pending_seeds`]).
-  /// Must be non-zero.
+  /// Must be non-zero and at most [`MAX_PENDING_SEEDS_CEILING`].
   pub fn with_max_pending_seeds(mut self, cap: usize) -> Self {
     self.max_pending_seeds = cap;
     self
