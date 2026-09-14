@@ -63,7 +63,7 @@ memberlist-proto = { workspace = true, default-features = false, features = [
   "tcp",
 ] }
 memberlist-embedded = { workspace = true, default-features = false }
-smoltcp = { version = "0.13", default-features = false, features = [
+smoltcp = { version = "0.14", default-features = false, features = [
   "alloc",
   "medium-ip",
   "medium-ethernet",
