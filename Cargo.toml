@@ -40,7 +40,7 @@ agnostic-io = { version = "0.2", default-features = false }
 agnostic = "0.11"
 async-lock = "3"
 async-channel = "2"
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 bytes = { version = "1", default-features = false }
 byteorder = { version = "1", default-features = false }
 varing = { version = "0.13", default-features = false }
