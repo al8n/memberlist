@@ -91,6 +91,13 @@ resolv-conf = { workspace = true, optional = true }
 getifs = { workspace = true, optional = true }
 iprfc = { workspace = true, optional = true }
 
+# The Windows bind path builds its own sockets so that neither half of a port
+# claim sets `SO_REUSEADDR` — on that platform the option lets a bind take a
+# port an active socket already owns. This is the socket2 compio-net itself
+# constructs sockets with, so the version unifies.
+[target.'cfg(windows)'.dependencies]
+socket2 = "0.6"
+
 [dev-dependencies]
 memberlist-test-suite = { path = "../tests/memberlist-test-suite" }
 serde_json.workspace = true

@@ -77,6 +77,38 @@ fn op_error_variants_display_and_predicates() {
   let not_running = OpError::NotRunning;
   assert!(!not_running.to_string().is_empty());
   assert!(not_running.is_not_running());
+  assert!(not_running.source().is_none());
+
+  let backlog = OpError::DialBacklogFull;
+  assert!(!backlog.to_string().is_empty());
+  assert!(backlog.is_dial_backlog_full());
+  assert!(backlog.source().is_none());
+  // Backpressure and the lifecycle refusal are distinct answers: one is worth
+  // retrying, the other never is.
+  assert!(!backlog.is_not_running());
+  assert!(!not_running.is_dial_backlog_full());
+
+  let stopped = OpError::RunnerStopped;
+  assert!(!stopped.to_string().is_empty());
+  assert!(stopped.is_runner_stopped());
+  assert!(stopped.source().is_none());
+  // A gone run loop and a left node are different facts about different things —
+  // the driver and the cluster membership — so neither answers for the other, and
+  // neither is the retryable backpressure.
+  assert!(!stopped.is_not_running());
+  assert!(!not_running.is_runner_stopped());
+  assert!(!stopped.is_dial_backlog_full());
+
+  // The `Rejected` variant carries the engine's own refusal and forwards its source
+  // rather than folding it into one of the answers a caller acts on.
+  let rejected = OpError::Rejected(memberlist_proto::Error::UnencodablePingTarget);
+  assert!(rejected.is_rejected());
+  assert!(!rejected.to_string().is_empty());
+  assert!(rejected.source().is_some());
+  assert!(!rejected.is_not_running());
+  assert!(!rejected.is_dial_backlog_full());
+  assert!(!rejected.is_runner_stopped());
+  assert!(!not_running.is_rejected());
 
   // The `Resolve` variant boxes a generic error and forwards its source.
   let resolve = OpError::Resolve(Box::new(SampleResolveError));

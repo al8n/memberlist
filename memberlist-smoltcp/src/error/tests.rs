@@ -63,6 +63,9 @@ fn all_variants() -> Vec<InitError> {
     InitError::ZeroUdpPackets,
     InitError::UdpRxPacketsTooLarge,
     InitError::ZeroGossipReadCap,
+    InitError::ZeroMaxPendingSeeds,
+    InitError::MaxPendingSeedsTooLarge(memberlist_embedded::MAX_PENDING_SEEDS_CEILING + 1),
+    InitError::ZeroMaxPendingDials,
     InitError::ZeroIngressPacketsPerPoll,
     InitError::ZeroCloseTimeout,
   ]
@@ -144,6 +147,24 @@ fn from_embedded_maps_each_mode() {
   assert!(matches!(
     InitError::from_embedded(E::ZeroCloseTimeout),
     InitError::ZeroCloseTimeout
+  ));
+  assert!(matches!(
+    InitError::from_embedded(E::ZeroGossipReadCap),
+    InitError::ZeroGossipReadCap
+  ));
+  assert!(matches!(
+    InitError::from_embedded(E::ZeroMaxPendingSeeds),
+    InitError::ZeroMaxPendingSeeds
+  ));
+  // Not folded into the wildcard: an over-ceiling seed cap would otherwise reach the
+  // caller as a generic endpoint-init failure, naming neither the knob nor its value.
+  assert!(matches!(
+    InitError::from_embedded(E::MaxPendingSeedsTooLarge(4096)),
+    InitError::MaxPendingSeedsTooLarge(4096)
+  ));
+  assert!(matches!(
+    InitError::from_embedded(E::ZeroMaxPendingDials),
+    InitError::ZeroMaxPendingDials
   ));
   assert!(matches!(
     InitError::from_embedded(E::NonRoutableAdvertiseAddr(sample_socket_addr())),

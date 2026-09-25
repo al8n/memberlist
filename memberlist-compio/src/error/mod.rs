@@ -178,6 +178,68 @@ impl std::fmt::Display for UserDialBacklogFull {
   }
 }
 
+/// Which of a node's bound sockets a shutdown could not prove it had released.
+///
+/// A driver's teardown proves a port free by COMPLETING the socket's last
+/// pending operation and then observing its `close` return `Ok`. When either
+/// step does not happen the operation may still own the descriptor, so the
+/// port may stay bound until the process exits — carried here so the caller
+/// knows which address it must not rebind straight away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnreleasedSocket {
+  /// The reliable-plane TCP listener (stream transports only).
+  Listener,
+  /// The UDP gossip socket. On the QUIC transport this is also the reliable
+  /// plane's socket, so it is the only one a QUIC node binds.
+  Gossip,
+  /// Both the TCP listener and the UDP gossip socket.
+  Both,
+}
+
+impl fmt::Display for UnreleasedSocket {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(match self {
+      Self::Listener => "the TCP listener",
+      Self::Gossip => "the UDP gossip socket",
+      Self::Both => "the TCP listener and the UDP gossip socket",
+    })
+  }
+}
+
+/// Payload for [`MemberlistError::ShutdownReleaseUnproven`]: which socket(s)
+/// the teardown could not prove it had released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownReleaseUnproven {
+  socket: UnreleasedSocket,
+}
+
+impl ShutdownReleaseUnproven {
+  /// Build from the socket(s) whose release could not be proven.
+  #[inline]
+  pub(crate) fn new(socket: UnreleasedSocket) -> Self {
+    Self { socket }
+  }
+
+  /// The socket(s) whose release could not be proven.
+  #[inline]
+  pub fn socket(&self) -> UnreleasedSocket {
+    self.socket
+  }
+}
+
+impl fmt::Display for ShutdownReleaseUnproven {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "the node is stopped, but shutdown could not prove {} was released; it may \
+       stay bound until the process exits, so an immediate rebind on the same \
+       address may fail",
+      self.socket,
+    )
+  }
+}
+
 /// Errors returned by [`Memberlist`](crate::Memberlist) operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -383,6 +445,22 @@ pub enum MemberlistError {
   #[cfg_attr(docsrs, doc(cfg(feature = "quic")))]
   #[error("{0}")]
   UserDialBacklogFull(UserDialBacklogFull),
+
+  /// [`shutdown`](crate::Memberlist::shutdown) ran the whole teardown but could
+  /// not PROVE that one of the node's bound ports was released. The driver
+  /// loop has exited, every waiter has been resolved, and the node no longer
+  /// participates in the cluster — the only thing in doubt is the socket.
+  ///
+  /// A port is proven free when the socket's last pending operation was
+  /// COMPLETED (rather than abandoned to a cancellation the backend may drop)
+  /// and its awaited `close` then returned `Ok` within the teardown's bound.
+  /// When either step fails, an operation may still own the descriptor and the
+  /// port can stay bound until the process exits. Returned instead of `Ok(())`
+  /// so a caller that rebinds the same address immediately — the whole reason
+  /// the teardown waits for the close before acking — is not told the address
+  /// is free when it may not be. Carries which socket(s) were affected.
+  #[error("{0}")]
+  ShutdownReleaseUnproven(ShutdownReleaseUnproven),
 
   /// The cluster label supplied to
   /// [`MemberlistOptions::with_label`](crate::MemberlistOptions::with_label)
